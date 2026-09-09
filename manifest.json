@@ -3,7 +3,7 @@
   "id": "openhab",
   "name": "openHAB",
   "version": "0.1.0",
-  "author": "Your Name",
+  "author": "powerk1977",
   "license": "MIT",
   "description": "View and control openHAB items from the Omarchy bar.",
   "kinds": [

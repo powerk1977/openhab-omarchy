@@ -96,7 +96,7 @@ No network or instance required.
 
 ```bash
 # JS model layer
-for t in config connection model row_model; do node "tests/test_$t.js"; done
+for t in config connection model row_model credentials mark; do node "tests/test_$t.js"; done
 
 # Python bridge (demo + fake server)
 PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 python3 tests/test_bridge.py
@@ -117,6 +117,12 @@ python3 -m py_compile bin/oh-bridge tests/*.py
 * Token, key, secret, and `Image` item states are redacted from logs and IPC.
 * Item names are treated as untrusted server data and stored in maps that
   can't be poisoned via `__proto__`-style keys.
+
+## AI disclosure
+
+This repository follows the
+[ai-disclosure convention](https://github.com/ggfevans/ai-disclosure); see
+[`AI_DISCLOSURE.md`](AI_DISCLOSURE.md).
 
 ## License
 
