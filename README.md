@@ -80,15 +80,56 @@ settings, `r` refreshes, `esc` closes. `tab` moves to the next bar panel.
 | `Color` | On/off + brightness slider (colour wheel planned) |
 | `Rollershutter`, `Player`, `Contact`, `Number` | Listed; control coming |
 
-## Building / running from source
+## Install
+
+From the marketplace-ready source:
+
+```bash
+omarchy plugin add https://github.com/powerk1977/openhab-omarchy.git --enable
+```
+
+The panel lands in the bar's right section by default. To place it
+elsewhere, move it:
+
+```bash
+omarchy bar move io.github.powerk1977.openhab --section right
+```
+
+First time through, open the panel with `s` and enter your API token, or store
+it in the keyring yourself — see [Connecting](#connecting).
+
+## Build from source
 
 ```bash
 omarchy plugin validate .
-ln -s "$(pwd)" ~/.config/omarchy/plugins/openhab
+ln -s "$(pwd)" ~/.config/omarchy/plugins/io.github.powerk1977.openhab
 ```
 
 Restart the shell (or let hot-reload pick it up on save). The panel is
-`openhab` in the default section of the bar.
+`io.github.powerk1977.openhab` in the right section of the bar.
+
+## Remove
+
+```bash
+omarchy plugin remove io.github.powerk1977.openhab
+```
+
+If you stored a token in the keyring yourself (rather than through the
+overlay), also delete it:
+
+```bash
+secret-tool clear --service openhab
+```
+
+## External dependencies
+
+- **Python 3.11 or newer** — `bin/oh-bridge` uses only the Python standard
+  library; nothing is pip-installed and no virtual environment is required.
+- **`secret-tool`** — system keyring access for the connect token.
+- **`nmcli`** (optional) — read-only lookup of the current Wi-Fi network name
+  used by the local-network URL gate. If it is missing, the plugin fails
+  closed: the local URL is never used and the overlay shows no network
+  suggestion.
 
 ## Tests
 

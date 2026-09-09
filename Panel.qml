@@ -9,13 +9,13 @@ import "Model.js" as Model
 // items and the connection.
 Panel {
     id: root
-    moduleName: "openhab"
-    ipcTarget: "openhab"
+    moduleName: "io.github.powerk1977.openhab"
+    ipcTarget: "io.github.powerk1977.openhab"
     // We own the target's single IpcHandler, so the methods below can sit
     // alongside the base open/close/toggle.
     manageIpc: false
 
-    readonly property var oh: bar && bar.shell ? bar.shell.serviceFor("openhab") : null
+    readonly property var oh: bar && bar.shell ? bar.shell.serviceFor("io.github.powerk1977.openhab") : null
     readonly property bool serviceReady: oh !== null
     readonly property string phase: serviceReady ? oh.phase : "idle"
 
@@ -125,7 +125,7 @@ Panel {
         if (!bar || !bar.shell || typeof bar.shell.summon !== "function")
             return;
         close();
-        bar.shell.summon("openhab", JSON.stringify({
+        bar.shell.summon("io.github.powerk1977.openhab", JSON.stringify({
             tab: tab || "connection"
         }));
     }
@@ -167,7 +167,7 @@ Panel {
     implicitHeight: button.implicitHeight
 
     IpcHandler {
-        target: "openhab"
+        target: "io.github.powerk1977.openhab"
 
         function open(): void {
             root.open();

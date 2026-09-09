@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "id": "openhab",
+  "id": "io.github.powerk1977.openhab",
   "name": "openHAB",
   "version": "0.1.0",
   "author": "powerk1977",

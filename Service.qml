@@ -12,12 +12,12 @@ import "RowModel.js" as RowModel
 //
 // A `service` is mounted once per session, a `bar-widget` once per monitor, so
 // the bridge, items and config live here. Widgets reach them through
-// `bar.shell.serviceFor("openhab")`.
+// `bar.shell.serviceFor("io.github.powerk1977.openhab")`.
 QtObject {
   id: root
 
   readonly property string home: Quickshell.env("HOME")
-  readonly property string pluginDir: home + "/.config/omarchy/plugins/openhab"
+  readonly property string pluginDir: home + "/.config/omarchy/plugins/io.github.powerk1977.openhab"
   readonly property string configDir: home + "/.config/omarchy/openhab"
   readonly property string configPath: configDir + "/config.json"
 

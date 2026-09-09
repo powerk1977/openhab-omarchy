@@ -10,7 +10,7 @@ import "Connection.js" as Connection
 // Connection credentials and demo mode.
 //
 // Summoned by the shell, not by IPC: the bar widget already owns the
-// "openhab" target and a target routes to one handler.
+// "io.github.powerk1977.openhab" target and a target routes to one handler.
 //   omarchy-shell shell summon openhab '{"tab":"connection"}'
 Item {
   id: root
@@ -120,7 +120,7 @@ Item {
   function dismiss() {
     root.opened = false
     if (root.shell && typeof root.shell.hide === "function") {
-      root.shell.hide((root.manifest && root.manifest.id) || "openhab")
+      root.shell.hide((root.manifest && root.manifest.id) || "io.github.powerk1977.openhab")
     }
   }
 
