@@ -1,0 +1,680 @@
+#!/usr/bin/env python3
+"""openHAB protocol adapter for the Omarchy plugin.
+
+Speaks the plugin's NDJSON protocol on stdin/stdout (protocol version 1):
+
+  -> {"op":"config","generation":5,"url":"...","localUrl":"","trustedNetwork":"",
+      "token":"<or-absent>","demoMode":false}
+  -> {"op":"disconnect"}
+  -> {"op":"refresh"}
+  -> {"op":"setItem","name":"...","command":"ON","tag":"..."}
+  -> {"op":"shutdown"}
+  <- {"ev":"phase","phase":"idle|connecting|connected|error","generation":N,
+       "error":"...","errorKind":"..."}
+  <- {"ev":"inventory","items":[...],"generation":N}
+  <- {"ev":"states","items":{"Item":{"state":"ON","type":"OnOff"},...},"generation":N}
+  <- {"ev":"statechanged","name":"...","state":"...","type":"...","generation":N}
+  <- {"ev":"result","tag":"...","success":true|false,"error":"...","generation":N}
+  <- {"ev":"config_ack","generation":N} | {"ev":"log","level":"...","message":"..."}
+
+The credential arrives over stdin and is never placed in argv. `token` is the
+canonical keyring string for the origin: either an openHAB API token (`oh.…`),
+or a `username:password` pair for proxies that demand Basic login — both are
+normalized (whitespace, quotes, a pasted `Bearer ` prefix) before use. The
+bridge owns the single live SSE connection; QML owns nothing network-related.
+"""
+
+import base64
+import json
+import re
+import ssl
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+PROTOCOL_VERSION = 1
+KIND_AUTH = "credential"
+KIND_NETWORK = "network"
+KIND_SSL = "ssl"
+
+from oh_bridge_helpers import current_wifi_ssid, network_trusted, redact_for_log  # noqa: E402
+
+
+def normalize_secret(raw):
+    """Strip paste artifacts off a secret: whitespace, surrounding quotes,
+    and a pasted `Bearer ` prefix (docs and copy-paste often include it).
+    Mirrors Credentials.js's normalizeSecret."""
+    v = re.sub(r"[\r\n\x00]", "", str(raw or ""))
+    v = v.strip().strip('"').strip("'")
+    if not v:
+        return v
+    if v.lower().startswith("bearer "):
+        v = v[len("Bearer "):].lstrip().strip('"').strip("'")
+    return v.strip()
+
+
+def normalize_credential(raw):
+    """Return (kind, user, secret) for a stored credential string.
+
+    kind is 'token', 'userpass', or '' for an empty credential. The keyring
+    holds one canonical string per origin — an API token verbatim (`oh.…`) or
+    a `user:pass` pair. openHAB API tokens start with `oh.` and never contain
+    ':', so a ':' marks a username/password pair. Mirrors Credentials.js.
+    """
+    v = normalize_secret(raw)
+    if not v:
+        return "", "", ""
+    cut = v.find(":")
+    if cut > 0 and not v.lower().startswith("oh."):
+        return "userpass", v[:cut], v[cut + 1:]
+    return "token", v, ""
+
+
+def auth_header(kind, user, secret=""):
+    if kind == "userpass":
+        raw = ("%s:%s" % (user, secret)).encode("utf-8")
+    elif kind == "token":
+        raw = ("%s:" % user).encode("utf-8")
+    else:
+        return ""
+    return "Basic " + base64.b64encode(raw).decode("ascii")
+
+
+class HttpError(Exception):
+    def __init__(self, code, reason, kind=KIND_NETWORK, body=b""):
+        super().__init__("%s %s" % (code, reason))
+        self.code = code
+        self.reason = reason
+        self.kind = kind
+        self.body = body
+
+
+class Http:
+    """TLS-verified, proxy-bypassed, no-compression-opting HTTP client."""
+
+    def __init__(self, token):
+        self._cred_kind, self._cred_user, self._cred_secret = normalize_credential(token)
+        self._token = auth_header(self._cred_kind, self._cred_user, self._cred_secret)
+        ctx = ssl.create_default_context()
+        self._opener = urllib.request.build_opener(
+            urllib.request.HTTPSHandler(context=ctx),
+            urllib.request.HTTPHandler(),
+            urllib.request.ProxyHandler({}))
+
+    def request(self, url, method="GET", body=None, ctype=None, accept=None,
+                timeout=10.0, stream=False):
+        headers = {"Accept": "application/json"}
+        if self._token:
+            headers["Authorization"] = self._token
+        if ctype:
+            headers["Content-Type"] = ctype
+        if accept:
+            headers["Accept"] = accept
+        req = urllib.request.Request(url, data=body, headers=headers, method=method)
+        if stream:
+            return self._opener.open(req, timeout=None)
+        try:
+            res = self._opener.open(req, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            kind = KIND_AUTH if exc.code == 401 else KIND_NETWORK
+            raise HttpError(exc.code, exc.reason or "", kind, exc.read())
+        except (urllib.error.URLError, OSError, ssl.SSLError) as exc:
+            if isinstance(exc, ssl.SSLError):
+                raise HttpError(0, "TLS error", KIND_SSL)
+            raise HttpError(0, getattr(exc, "reason", None) or str(exc), KIND_NETWORK)
+        data = res.read()
+        return res, data
+
+
+# ---------------------------------------------------------------------------
+# demo backend: a small skippable openHAB
+
+DEMO_INVENTORY = [
+    {"name": "Living_Room", "type": "Group", "label": "Living Room",
+     "metadata": {"semantics": {"value": "Location_Indoor"}}, "groupNames": []},
+    {"name": "Living_Room_Ceiling", "type": "Group", "label": "Ceiling",
+     "metadata": {"semantics": {"value": "Equipment_LightSource_Bulb",
+                                "config": {"hasLocation": "Living_Room"}}}, "groupNames": []},
+    {"name": "Living_Room_Ceiling_Dimmer", "type": "Dimmer", "label": "Ceiling Lamp",
+     "state": "60",
+     "metadata": {"semantics": {"value": "Point_Control_Percentage",
+                                "config": {"isPointOf": "Living_Room_Ceiling"}}}, "groupNames": []},
+    {"name": "Kitchen", "type": "Group", "label": "Kitchen",
+     "metadata": {"semantics": {"value": "Location_Indoor"}}, "groupNames": []},
+    {"name": "Kitchen_Island", "type": "Group", "label": "Island",
+     "metadata": {"semantics": {"value": "Equipment_LightSource_Bulb",
+                                "config": {"hasLocation": "Kitchen"}}}, "groupNames": []},
+    {"name": "Kitchen_Island_Switch", "type": "Switch", "label": "Island Lights",
+     "state": "ON",
+     "metadata": {"semantics": {"value": "Point_Control_OnOff",
+                                "config": {"isPointOf": "Kitchen_Island"}}}, "groupNames": []},
+    {"name": "Office", "type": "Group", "label": "Office",
+     "metadata": {"semantics": {"value": "Location_Indoor"}}, "groupNames": []},
+    {"name": "Office_Desk_Pendant", "type": "Group", "label": "Desk Pendant",
+     "metadata": {"semantics": {"value": "Equipment_LightSource_Bulb",
+                                "config": {"hasLocation": "Office"}}}, "groupNames": []},
+    {"name": "Office_Desk_Pendant_Color", "type": "Color", "label": "Desk Pendant",
+     "state": "200,100,80",
+     "metadata": {"semantics": {"value": "Point_Control_Color",
+                                "config": {"isPointOf": "Office_Desk_Pendant"}}}, "groupNames": []},
+]
+
+
+class DemoTransport:
+    """In-process openHAB for `--demo`. A timer flips a dimmer so the UI
+    receives real statechanged frames as a live instance would."""
+
+    def __init__(self):
+        self._items = {raw["name"]: dict(raw) for raw in DEMO_INVENTORY}
+
+    def inventory(self):
+        return list(self._items.values())
+
+    def states_map(self):
+        return {name: {"state": item.get("state", ""), "type": item["type"]}
+                for name, item in self._items.items()}
+
+    def set_item(self, name, command):
+        item = self._items.get(name)
+        if not item:
+            return False, "unknown item"
+        if item["type"] == "Switch":
+            if command not in ("ON", "OFF"):
+                return False, "bad command"
+            item["state"] = command
+            return True, ""
+        if item["type"] in ("Dimmer", "Color"):
+            if command == "ON":
+                cur = self._brightness(item)
+                item["state"] = str(max(cur, 1))
+                return True, ""
+            if command == "OFF":
+                self._set_brightness(item, 0)
+                return True, ""
+            if command.isdigit():
+                self._set_brightness(item, max(min(int(command), 100), 0))
+                return True, ""
+            return False, "bad command"
+        return False, "unsupported"
+
+    def _brightness(self, item):
+        if item["type"] == "Color":
+            parts = item["state"].split(",")
+            return int(parts[2]) if len(parts) == 3 else 0
+        return int(item.get("state", 0) or 0)
+
+    def _set_brightness(self, item, level):
+        if item["type"] == "Color":
+            parts = item["state"].split(",") if "," in item["state"] else ["0", "0", "0"]
+            parts[2] = str(level)
+            item["state"] = ",".join(parts)
+        else:
+            item["state"] = str(level)
+
+    def drift(self):
+        dims = [name for name, it in self._items.items()
+                if it["type"] in ("Dimmer", "Color")]
+        if not dims:
+            return
+        name = dims[int(time.time() * 1000) % len(dims)]
+        if self._brightness(self._items[name]) > 0:
+            self._set_brightness(self._items[name], 0)
+        else:
+            self._set_brightness(self._items[name], 60)
+        return name
+
+
+# ---------------------------------------------------------------------------
+# the bridge session
+
+class Bridge:
+    def __init__(self, demo_mode=False):
+        self._mode = "demo" if demo_mode else "remote"
+        self._generation = 0
+        self._phase = "idle"
+        self._error = ""
+        self._error_kind = ""
+        self._want_connect = False
+        self._demo = None
+        self._http = None
+        self._config = {}
+        self._teardown_lock = threading.Lock()
+        self._emit_lock = threading.Lock()
+        self._sse_conn = None
+        self._sse_thread = None
+        self._sse_run = threading.Event()
+        self._sse_connection_id = ""
+        self._auth_failures = 0
+        self._initial_states_seen = False
+        self._tracked_names = []
+        self._using_local = False
+
+    # -- emitters -----------------------------------------------------------
+
+    def emit(self, obj):
+        line = json.dumps(obj, separators=(",", ":"))
+        with self._emit_lock:
+            try:
+                sys.stdout.write(line + "\n")
+                sys.stdout.flush()
+            except (BrokenPipeError, OSError):
+                pass
+
+    def _phase_event(self, phase, error="", error_kind=""):
+        event = {"ev": "phase", "phase": phase, "generation": self._generation}
+        if error:
+            event["error"] = error
+        if error_kind:
+            event["errorKind"] = error_kind
+        self.emit(event)
+
+    def _result(self, tag, ok, error=""):
+        self.emit({"ev": "result", "tag": tag, "success": ok, "error": error,
+                   "generation": self._generation})
+
+    def _log(self, level, message):
+        self.emit({"ev": "log", "level": level,
+                   "message": redact_for_log(message)})
+
+    def _set_phase(self, phase, error="", error_kind="", extra=None):
+        with self._teardown_lock:
+            changing = (phase, error, error_kind) != (self._phase, self._error, self._error_kind)
+            self._phase, self._error, self._error_kind = phase, error, error_kind
+        if changing:
+            event = {"ev": "phase", "phase": phase, "generation": self._generation}
+            if error:
+                event["error"] = error
+            if error_kind:
+                event["errorKind"] = error_kind
+            if extra:
+                event.update(extra)
+            self.emit(event)
+
+    # -- stdin dispatch -----------------------------------------------------
+
+    def handle_line(self, line):
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            self._log("error", "non-JSON input line")
+            return
+        op = msg.get("op")
+        if op == "config":
+            self._handle_config(msg)
+        elif op == "disconnect":
+            self._handle_disconnect()
+        elif op == "refresh":
+            self._handle_refresh()
+        elif op == "setItem":
+            self._handle_set_item(msg)
+        elif op == "shutdown":
+            self.emit({"ev": "exited", "reason": "shutdown"})
+            sys.exit(0)
+        else:
+            self._log("warn", "unknown op: %r" % op)
+
+    def _handle_config(self, msg):
+        generation = msg.get("generation")
+        if not isinstance(generation, int):
+            self._log("error", "config without integer generation")
+            return
+        demo_mode = msg.get("demoMode") is True
+        with self._teardown_lock:
+            self._generation = generation
+            self._mode = "demo" if demo_mode else "remote"
+        self._config = {
+            "url": str(msg.get("url") or "").strip(),
+            "localUrl": str(msg.get("localUrl") or "").strip(),
+            "trustedNetwork": str(msg.get("trustedNetwork") or "").strip(),
+            "token": str(msg.get("token") or ""),  # never logged, never argv
+            "credKind": normalize_credential(msg.get("token"))[0],
+            "demoMode": demo_mode,
+        }
+        self._teardown_session()
+        self._want_connect = True
+        self._auth_failures = 0
+        self._initial_states_seen = False
+        self.emit({"ev": "config_ack", "generation": generation})
+        if demo_mode:
+            self._demo = DemoTransport()
+            self.emit({"ev": "inventory", "items": self._demo.inventory(),
+                       "generation": generation})
+            self.emit({"ev": "states", "items": self._demo.states_map(),
+                       "generation": generation})
+            self._set_phase("connected")
+            self._start_demo_drift()
+        else:
+            if not self._config["url"]:
+                self._want_connect = False
+                self._set_phase("error", "no server URL set", KIND_AUTH)
+                return
+            self._connect_http()
+
+    def _start_demo_drift(self):
+        def run():
+            time.sleep(3.0)
+            while self._mode == "demo" and self._phase == "connected" and self._demo:
+                time.sleep(2.5)
+                changed = self._demo.drift()
+                if changed:
+                    item = self._demo._items[changed]
+                    self.emit({"ev": "statechanged", "name": changed,
+                               "state": item.get("state", ""), "type": item["type"],
+                               "generation": self._generation})
+        threading.Thread(target=run, daemon=True).start()
+
+    def _handle_disconnect(self):
+        self._want_connect = False
+        self._teardown_session()
+        self._set_phase("idle")
+
+    def _handle_refresh(self):
+        if self._mode == "demo":
+            if not self._demo:
+                return
+            self.emit({"ev": "inventory", "items": self._demo.inventory(),
+                       "generation": self._generation})
+            self.emit({"ev": "states", "items": self._demo.states_map(),
+                       "generation": self._generation})
+            return
+        if self._phase != "connected":
+            return
+        threading.Thread(target=self._refresh_http, daemon=True).start()
+
+    def _handle_set_item(self, msg):
+        name = str(msg.get("name") or "")
+        command = str(msg.get("command") or "")
+        tag = str(msg.get("tag") or "")
+        if not name or not command:
+            self._result(tag, False, "name and command required")
+            return
+        if self._mode == "demo":
+            ok, err = self._demo.set_item(name, command)
+            if ok:
+                item = self._demo._items[name]
+                self.emit({"ev": "statechanged", "name": name,
+                           "state": item.get("state", ""), "type": item["type"],
+                           "generation": self._generation})
+            self._result(tag, ok, err)
+            return
+        threading.Thread(target=self._set_item_http,
+                         args=(name, command, tag), daemon=True).start()
+
+    # -- live connection ----------------------------------------------------
+
+    def _resolved_url(self):
+        # Re-checked fresh per call: current_wifi_ssid() consults
+        # NetworkManager every time.
+        if network_trusted(self._config.get("localUrl"),
+                           self._config.get("trustedNetwork")):
+            return self._config["localUrl"].rstrip("/")
+        return self._config["url"].rstrip("/")
+
+    def _connect_http(self):
+        def run():
+            gen = self._generation
+            self._set_phase("connecting")
+            base = self._resolved_url()
+            self._using_local = (
+                base != self._config.get("url", "").rstrip("/")
+                and bool(self._config.get("localUrl")))
+            if not re.match(r"^https?://", base):
+                self._set_phase("error", "URL must start with http:// or https://", KIND_NETWORK)
+                return
+            if base.startswith("http://"):
+                self._log("info", "connecting over plaintext http (token could be read on the LAN)")
+            self._http = Http(self._config["token"])
+            try:
+                res, data = self._http.request(base + "/rest/items?recursive=false",
+                                               timeout=12.0)
+                if not self._want_connect or self._generation != gen:
+                    return
+                items = json.loads(data.decode("utf-8"))
+                if not isinstance(items, list):
+                    raise HttpError(0, "unexpected items payload", KIND_NETWORK, data)
+                names = [i["name"] for i in items
+                         if isinstance(i, dict) and isinstance(i.get("name"), str)]
+                self._tracked_names = names
+                self.emit({"ev": "inventory", "items": items,
+                           "generation": self._generation})
+                if not self._want_connect or self._generation != gen:
+                    return
+                self._open_sse(base)
+            except HttpError as exc:
+                if exc.code == 401:
+                    self._handle_auth_failure()
+                    return
+                self._set_phase("error", redact_for_log(str(exc)), exc.kind)
+                self._schedule_reconnect()
+            except Exception as exc:
+                self._log("error", "connect failed: %s" % redact_for_log(str(exc)))
+                self._set_phase("error", "connection failed", KIND_NETWORK)
+                self._schedule_reconnect()
+        threading.Thread(target=run, daemon=True).start()
+
+    def _handle_auth_failure(self):
+        self._auth_failures += 1
+        if self._auth_failures >= 2:
+            self._want_connect = False
+            form = ("username/password pair you configured"
+                    if self._config.get("credKind") == "userpass"
+                    else "access token (it starts with 'oh.')")
+            self._set_phase(
+                "error",
+                "authentication failed (HTTP 401): the server or an auth "
+                "proxy rejected the credentials — check the %s." % form,
+                KIND_AUTH)
+            return
+        self._log("info", "auth rejected; retrying once")
+        time.sleep(2.0)
+        if self._want_connect and self._mode == "remote":
+            self._connect_http()
+
+    def _schedule_reconnect(self):
+        def run():
+            time.sleep(5.0)
+            with self._teardown_lock:
+                if (self._want_connect and self._mode == "remote"
+                        and self._phase != "connected"):
+                    self._connect_http()
+        threading.Thread(target=run, daemon=True).start()
+
+    def _open_sse(self, base):
+        try:
+            conn = self._http.request(base + "/rest/events/states", method="GET",
+                                      accept="text/event-stream", stream=True,
+                                      timeout=None)
+        except HttpError as exc:
+            if exc.code == 401:
+                self._handle_auth_failure()
+            else:
+                self._set_phase("error", redact_for_log(str(exc)), exc.kind)
+                self._schedule_reconnect()
+            return
+        except Exception as exc:
+            self._log("error", "SSE open failed: %s" % redact_for_log(str(exc)))
+            self._set_phase("error", "connection failed", KIND_NETWORK)
+            self._schedule_reconnect()
+            return
+        self._sse_conn = conn
+        self._sse_run.set()
+        self._sse_thread = threading.Thread(target=self._sse_loop,
+                                            args=(conn, base), daemon=True)
+        self._sse_thread.start()
+
+    def _sse_loop(self, conn, base):
+        posted = False
+        event_name = ""
+        try:
+            while self._sse_run.is_set():
+                line = conn.readline()
+                if not line:
+                    break
+                if isinstance(line, bytes):
+                    line = line.decode("utf-8", "replace")
+                line = line.rstrip("\r\n")
+                if not line or line.startswith(":"):
+                    continue
+                if not line.startswith("event:") and not line.startswith("data:"):
+                    continue
+                if line.startswith("event:"):
+                    event_name = line[len("event:"):].strip()
+                    continue
+                data = line[len("data:"):].strip()
+                if event_name == "ready":
+                    self._sse_connection_id = data
+                    if not posted:
+                        self._post_tracked(base, self._tracked_names)
+                        posted = True
+                    event_name = ""
+                    continue
+                if not data:
+                    continue
+                try:
+                    payload = json.loads(data)
+                except ValueError:
+                    self._log("error", "unparsable SSE data frame")
+                    event_name = ""
+                    continue
+                if isinstance(payload, dict):
+                    self._handle_state_map(payload)
+                event_name = ""
+        except Exception as exc:
+            self._log("error", "SSE stream error: %s" % redact_for_log(str(exc)))
+        finally:
+            self._force_close_stream(conn)
+            with self._teardown_lock:
+                if self._sse_conn is conn:
+                    self._sse_conn = None
+                self._sse_run.clear()
+            if not posted:
+                self._set_phase("error", "SSE never became ready", KIND_NETWORK)
+                self._schedule_reconnect()
+            elif self._want_connect and self._mode == "remote":
+                self._set_phase("error", "connection lost", KIND_NETWORK)
+                self._schedule_reconnect()
+
+    def _post_tracked(self, base, names):
+        if not names:
+            raise HttpError(0, "no items to track", KIND_NETWORK)
+        try:
+            self._http.request(
+                base + "/rest/events/states/" + urllib.parse.quote(self._sse_connection_id, safe=""),
+                method="POST", body=json.dumps(names).encode("utf-8"),
+                ctype="application/json", timeout=8.0)
+        except HttpError as exc:
+            raise
+        except Exception as exc:
+            raise HttpError(0, str(exc), KIND_NETWORK)
+
+    def _handle_state_map(self, payload):
+        if not self._initial_states_seen:
+            self._initial_states_seen = True
+            self.emit({"ev": "states", "items": payload,
+                       "generation": self._generation})
+            self._set_phase("connected",
+                            extra={"usingLocal": self._using_local})
+            return
+        for name, state in list(payload.items()):
+            if isinstance(state, dict):
+                state_text = state.get("state")
+                state_type = state.get("type", "")
+            else:
+                state_text = state
+                state_type = ""
+            self.emit({"ev": "statechanged", "name": name,
+                       "state": str(state_text) if state_text is not None else "",
+                       "type": str(state_type or ""), "generation": self._generation})
+
+    def _refresh_http(self):
+        try:
+            base = self._resolved_url()
+            res, data = self._http.request(base + "/rest/items?recursive=false",
+                                           timeout=12.0)
+            items = json.loads(data.decode("utf-8"))
+            if not isinstance(items, list):
+                return
+            names = [i["name"] for i in items
+                     if isinstance(i, dict) and isinstance(i.get("name"), str)]
+            self.emit({"ev": "inventory", "items": items, "generation": self._generation})
+            self._tracked_names = names
+            if self._sse_connection_id and self._sse_run.is_set():
+                self._post_tracked(base, names)
+        except Exception as exc:
+            self._log("error", "refresh failed: %s" % redact_for_log(str(exc)))
+
+    def _set_item_http(self, name, command, tag):
+        url = self._resolved_url() + "/rest/items/" + urllib.parse.quote(name, safe="")
+        try:
+            self._http.request(url, method="POST", body=command.encode("utf-8"),
+                               ctype="text/plain", timeout=8.0)
+            # The change also arrives over SSE as a statechanged frame.
+            self._result(tag, True, "")
+        except HttpError as exc:
+            self._result(tag, False, exc.reason or "command failed")
+        except Exception as exc:
+            self._log("error", "command failed: %s" % redact_for_log(str(exc)))
+            self._result(tag, False, "command failed")
+
+    def _teardown_session(self):
+        self._sse_run.clear()
+        conn = self._sse_conn
+        if conn is not None:
+            self._force_close_stream(conn)
+            self._sse_conn = None
+        thread = self._sse_thread
+        if thread is not None:
+            try:
+                thread.join(timeout=2.0)
+            except Exception:
+                pass
+            self._sse_thread = None
+
+    @staticmethod
+    def _force_close_stream(conn):
+        """Close a streamed HTTP response WITHOUT draining its body.
+
+        urllib's HTTPResponse.close() on a streaming SSE body tries to read
+        the remaining stream to completion, which blocks forever on a never-
+        ending SSE connection. Closing the underlying socket directly unblocks
+        any concurrent readline() reliably.
+        """
+        sock = None
+        try:
+            fp = getattr(conn, "fp", None)
+            if fp is not None:
+                sock = getattr(fp, "raw", None)
+                sock = getattr(sock, "_sock", sock)
+        except Exception:
+            sock = None
+        if sock is not None:
+            try:
+                sock.shutdown(__import__("socket").SHUT_RDWR)
+            except Exception:
+                pass
+            try:
+                sock.close()
+            except Exception:
+                pass
+        else:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# entrypoint
+
+if __name__ == "__main__":
+    demo_mode = "--demo" in sys.argv[1:]
+    bridge = Bridge(demo_mode=demo_mode)
+    bridge.emit({"ev": "hello", "version": PROTOCOL_VERSION,
+                 "mode": "demo" if demo_mode else "remote"})
+    for line in sys.stdin:
+        bridge.handle_line(line)
+    bridge.emit({"ev": "exited", "reason": "eof"})
+    sys.exit(0)

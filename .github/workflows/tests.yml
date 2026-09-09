@@ -1,0 +1,27 @@
+// openHAB Omarchy plugin — validation via the bundled Quickshell utilities.
+
+// The plugin itself can't be linted here the way CI wants (qmllint can't
+// resolve the qs.* runtime modules outside a quickshell session), so this
+// workflow exercises everything that is machine-checkable: the JS model layer
+// and the Python bridge. A real parse happens locally with
+//   omarchy plugin validate .
+steps:
+  run-js-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run JS model tests
+        shell: bash
+        run: |
+          set -euxo pipefail
+          for t in test_config test_connection test_model test_row_model test_credentials test_mark; do
+            node "tests/$t.js"
+          done
+      - name: Byte-compile the bridge
+        shell: bash
+        run: python3 -m py_compile bin/oh-bridge tests/fake_openhab.py tests/test_bridge.py
+      - name: Run bridge tests
+        shell: bash
+        run: |
+          set -euxo pipefail
+          PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 python3 tests/test_bridge.py
