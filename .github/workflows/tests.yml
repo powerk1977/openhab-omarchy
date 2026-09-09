@@ -23,6 +23,36 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
+      - name: Reject agent-control files (recursive release guard)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Marketplace ships the whole repository tree, so submitter-controlled
+          # agent instructions would persist inside the plugin scope. Guard
+          # against every known agent-control filename at any depth.
+          found=""
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            found="$found${found:+$'\n'}$f"
+          done < <(find . -path ./.git -prune -o -type f \( \
+            -iname 'AGENTS.md' \
+            -o -iname 'AGENT.md' \
+            -o -iname 'CLAUDE.md' \
+            -o -iname 'CURSOR.md' \
+            -o -iname 'CVS.md' \
+            -o -iname 'CODEOWNERS.md' \
+            -o -iname '.cursorrules' \
+            -o -iname 'COPILOT_INSTRUCTIONS.md' \
+            -o -iname 'CONTEXT.md' \
+            -o -iname 'RULES.md' \
+            -o -iname '*.mdc' \
+          \) -print)
+          if [ -n "$found" ]; then
+            echo "::error::Agent-control files must not ship in the plugin:"
+            printf '  %s\n' "$found"
+            exit 1
+          fi
+          echo "No agent-control files found."
       - name: Run JS model tests
         shell: bash
         run: |

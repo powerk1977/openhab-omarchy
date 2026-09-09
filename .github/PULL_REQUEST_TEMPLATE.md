@@ -1,9 +1,9 @@
 <!--
   Delete this block before opening.
-  Prefer small PRs. See AGENTS.md for security invariants, coding
+  Prefer small PRs. See DEVELOPING.md for security invariants, coding
   conventions, and the verification suite. Security-sensitive paths
   (token handling, REST/SSE, local-network gate, workflow/CI changes)
-  need the red-lane scrutiny from AGENTS.md's code review rules.
+  need the red-lane scrutiny from DEVELOPING.md's code review rules.
 -->
 
 ## Summary
@@ -20,7 +20,7 @@ Per the [ai-disclosure convention](https://github.com/ggfevans/ai-disclosure):
 
 ## Checks
 
-- [ ] All relevant tests pass (see AGENTS.md → Verification)
+- [ ] All relevant tests pass (see DEVELOPING.md → Verification)
 - [ ] Secret scan (gitleaks) is clean on this branch
 - [ ] No hardcoded credentials, local absolute paths, or private
       server details introduced
