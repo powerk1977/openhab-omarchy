@@ -281,10 +281,11 @@ def test_credential_helpers():
         ("", "", "", ""),                     # empty -> no credential
         ("user:", "userpass", "user", ""),
     ]
-    for raw, kind, user, secret in cases:
+    for i, (raw, kind, user, secret) in enumerate(cases):
         got = b.normalize_credential(raw)
-        report("cred: normalize(%r) -> %r" % (raw, kind),
-               got == (kind, user, secret), repr(got))
+        ok = got == (kind, user, secret)
+        report("cred: normalize case %d -> %s" % (i, kind), ok,
+               "matched" if ok else "mismatch")
     secret_cases = {
         '"Bearer  sekrit"': "sekrit",
         "'oh.abc'": "oh.abc",
@@ -293,9 +294,11 @@ def test_credential_helpers():
         "sekrit": "sekrit",
         "": "",
     }
-    for raw, want in sorted(secret_cases.items()):
+    for i, (raw, want) in enumerate(sorted(secret_cases.items())):
         got = b.normalize_secret(raw)
-        report("cred: normalize_secret(%r)" % raw, got == want, repr(got))
+        ok = got == want
+        report("cred: normalize_secret case %d" % i, ok,
+               "matched" if ok else "mismatch")
     import base64 as _b64
     report("cred: token header", b.auth_header("token", "sekrit") ==
            "Basic " + _b64.b64encode(b"sekrit:").decode())
