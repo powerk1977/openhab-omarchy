@@ -1,12 +1,20 @@
-// openHAB Omarchy plugin — validation via the bundled Quickshell utilities.
+name: Tests
 
-// The plugin itself can't be linted here the way CI wants (qmllint can't
-// resolve the qs.* runtime modules outside a quickshell session), so this
-// workflow exercises everything that is machine-checkable: the JS model layer
-// and the Python bridge. A real parse happens locally with
-//   omarchy plugin validate .
-steps:
-  run-js-tests:
+# openHAB Omarchy plugin — validation via the bundled Quickshell utilities.
+#
+# The plugin itself can't be linted here the way CI wants (qmllint can't
+# resolve the qs.* runtime modules outside a quickshell session), so this
+# workflow exercises everything that is machine-checkable: the JS model layer
+# and the Python bridge. A real parse happens locally with
+#   omarchy plugin validate .
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  run-tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
