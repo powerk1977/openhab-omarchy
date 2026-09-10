@@ -395,6 +395,109 @@ def test_trusted_network_gate():
     return h
 
 
+def test_bounded_body_reads():
+    """Http._read_bounded caps bodies by Content-Length precheck and by a
+    streaming MAX+1 read, so an oversized or undeclared body can't run away."""
+    b = load_bridge()
+
+    class FakeRes:
+        def __init__(self, headers, chunks):
+            self.headers = headers
+            self._chunks = list(chunks)
+
+        def read(self, n):
+            if not self._chunks:
+                return b""
+            return self._chunks.pop(0)[:n]
+
+    got = b.Http._read_bounded(FakeRes({"Content-Length": "4"}, [b"abcd"]), 8)
+    report("bounded: small body read whole", got == b"abcd", repr(got))
+    got = b.Http._read_bounded(FakeRes({}, [b"ab", b"cd"]), 8)
+    report("bounded: chunked body assembled", got == b"abcd", repr(got))
+    try:
+        b.Http._read_bounded(FakeRes({"Content-Length": "100"}, [b"x"]), 8)
+        rejected = False
+    except b.HttpError:
+        rejected = True
+    report("bounded: declared Content-Length rejected", rejected)
+    try:
+        b.Http._read_bounded(FakeRes({}, [b"x" * 65536, b"y" * 65536, b"z" * 65536]), 100000)
+        rejected = False
+    except b.HttpError:
+        rejected = True
+    report("bounded: runaway streaming body rejected", rejected)
+    try:
+        b.Http._read_bounded(FakeRes({}, [b"x"] * 9), 8)
+        rejected = False
+    except b.HttpError:
+        rejected = True
+    report("bounded: just-over cap rejected", rejected)
+    return None
+
+
+def test_sse_line_bounds():
+    """Bridge._iter_sse_lines splits SSE cleanly and refuses a line longer
+    than the configured cap instead of buffering it without bound."""
+    b = load_bridge()
+    bridge = b.Bridge()
+
+    class FakeConn:
+        def __init__(self, chunks):
+            self._chunks = list(chunks)
+
+        def read1(self, n):
+            if not self._chunks:
+                return b""
+            chunk = self._chunks.pop(0)
+            return chunk[:n]
+
+    conn = FakeConn([b"event: ready\ndata: ok\n\n", b"data: {}\n\n"])
+    lines = list(bridge._iter_sse_lines(conn, max_line=128))
+    want = [b"event: ready", b"data: ok", b"", b"data: {}", b""]
+    report("sse: lines yieled in order", lines == want, repr(lines))
+    conn = FakeConn([b"x" * 1024 + b"\n"])
+    try:
+        list(bridge._iter_sse_lines(conn, max_line=128))
+        rejected = False
+    except b.HttpError:
+        rejected = True
+    report("sse: over-long line rejected by cap", rejected)
+    conn = FakeConn([b"x" * 256 + b"\n"])
+    ok = True
+    try:
+        list(bridge._iter_sse_lines(conn, max_line=256))
+    except b.HttpError:
+        ok = False
+    report("sse: exactly-at-cap not rejected", ok)
+    conn = FakeConn([b"x" * 257 + b"\n"])
+    try:
+        list(bridge._iter_sse_lines(conn, max_line=256))
+        rejected = False
+    except b.HttpError:
+        rejected = True
+    report("sse: one-over-cap rejected", rejected)
+    return None
+
+
+def test_sse_line_limit_end_to_end():
+    """A hostile SSE endpoint sending an over-long first line must fail the
+    stream closed into the error phase, not block the helper forever."""
+    server = FakeOpenHAB(token="sekrit").start()
+    server.huge_sse_line = True
+    try:
+        h = Harness()
+        h.send({"op": "config", "generation": 14, "url": server.base,
+                "token": "sekrit"})
+        ev = h.wait_for(lambda e: e.get("ev") == "phase" and e.get("phase") == "error",
+                        timeout=8.0)
+        report("sse: hostile over-long line -> error phase", ev is not None,
+               json.dumps(ev) if ev else "timeout")
+        h.close()
+    finally:
+        server.stop()
+    return h
+
+
 def main():
     tests = [
         test_demo_mode, test_live_connect, test_live_command_and_push,
@@ -403,6 +506,8 @@ def main():
         test_disconnect_idles,
         test_reconfig_reconnects, test_ssl_requires_verified_tls,
         test_trusted_network_gate,
+        test_bounded_body_reads, test_sse_line_bounds,
+        test_sse_line_limit_end_to_end,
     ]
     for test in tests:
         try:

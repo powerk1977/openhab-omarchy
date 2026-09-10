@@ -40,6 +40,13 @@ KIND_AUTH = "credential"
 KIND_NETWORK = "network"
 KIND_SSL = "ssl"
 
+CONNECT_TIMEOUT = 10.0          # finite deadline for opening + headers
+SSE_IDLE_TIMEOUT = 300.0        # socket recv deadline while streaming
+MAX_BODY_BYTES = 16 * 1024 * 1024        # ceiling on any non-streamed body
+MAX_SSE_LINE_BYTES = 256 * 1024          # per SSE line
+MAX_SSE_EVENT_BYTES = 8 * 1024 * 1024    # per logical SSE event
+MAX_SSE_RECORDS = 1_000_000              # entries in one state map
+
 from oh_bridge_helpers import current_wifi_ssid, network_trusted, redact_for_log  # noqa: E402
 
 
@@ -105,7 +112,7 @@ class Http:
             urllib.request.ProxyHandler({}))
 
     def request(self, url, method="GET", body=None, ctype=None, accept=None,
-                timeout=10.0, stream=False):
+                timeout=10.0, stream=False, max_body=MAX_BODY_BYTES):
         headers = {"Accept": "application/json"}
         if self._token:
             headers["Authorization"] = self._token
@@ -115,18 +122,70 @@ class Http:
             headers["Accept"] = accept
         req = urllib.request.Request(url, data=body, headers=headers, method=method)
         if stream:
-            return self._opener.open(req, timeout=None)
+            return self._opener.open(req, timeout=timeout)
         try:
             res = self._opener.open(req, timeout=timeout)
         except urllib.error.HTTPError as exc:
             kind = KIND_AUTH if exc.code == 401 else KIND_NETWORK
-            raise HttpError(exc.code, exc.reason or "", kind, exc.read())
+            raise HttpError(exc.code, exc.reason or "", kind,
+                            self._read_bounded(exc, max_body))
         except (urllib.error.URLError, OSError, ssl.SSLError) as exc:
             if isinstance(exc, ssl.SSLError):
                 raise HttpError(0, "TLS error", KIND_SSL)
             raise HttpError(0, getattr(exc, "reason", None) or str(exc), KIND_NETWORK)
-        data = res.read()
+        data = self._read_bounded(res, max_body)
         return res, data
+
+    @staticmethod
+    def _read_bounded(res, limit):
+        """Read a complete body, capped at `limit` bytes.
+
+        Pre-checks Content-Length when the server declares it, then streams
+        in bounded chunks and aborts if the body ever exceeds the cap, so a
+        faulty or hostile endpoint cannot force unbounded memory use.
+        """
+        cl = None
+        try:
+            cl = res.headers.get("Content-Length")
+        except Exception:
+            cl = None
+        if cl is not None:
+            try:
+                if int(cl) > limit:
+                    raise HttpError(0, "response body exceeds size limit", KIND_NETWORK)
+            except (ValueError, TypeError):
+                pass
+        chunks = []
+        total = 0
+        while True:
+            want = min(65536, limit + 1 - total)
+            if want <= 0:
+                break
+            try:
+                chunk = res.read(want)
+            except (urllib.error.URLError, OSError, ssl.SSLError):
+                raise HttpError(0, "response body read failed", KIND_NETWORK)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > limit:
+                raise HttpError(0, "response body exceeds size limit", KIND_NETWORK)
+        return b"".join(chunks)
+
+    @staticmethod
+    def _stream_socket(conn):
+        """Reach the raw socket behind a streamed HTTPResponse, or None."""
+        try:
+            fp = getattr(conn, "fp", None)
+            if fp is None:
+                return None
+            raw = getattr(fp, "raw", None)
+            if raw is None:
+                return None
+            return getattr(raw, "_sock", None)
+        except Exception:
+            return None
 
 
 # ---------------------------------------------------------------------------
@@ -486,7 +545,7 @@ class Bridge:
         try:
             conn = self._http.request(base + "/rest/events/states", method="GET",
                                       accept="text/event-stream", stream=True,
-                                      timeout=None)
+                                      timeout=CONNECT_TIMEOUT)
         except HttpError as exc:
             if exc.code == 401:
                 self._handle_auth_failure()
@@ -499,27 +558,50 @@ class Bridge:
             self._set_phase("error", "connection failed", KIND_NETWORK)
             self._schedule_reconnect()
             return
+        sock = Http._stream_socket(conn)
+        if sock is None or not self._set_stream_idle(sock):
+            self._force_close_stream(conn)
+            self._set_phase("error", "connection failed", KIND_NETWORK)
+            self._schedule_reconnect()
+            return
         self._sse_conn = conn
         self._sse_run.set()
         self._sse_thread = threading.Thread(target=self._sse_loop,
                                             args=(conn, base), daemon=True)
         self._sse_thread.start()
 
+    def _set_stream_idle(self, sock):
+        """Bound each recv on the stream so readline/read1 can't block forever."""
+        try:
+            sock.settimeout(SSE_IDLE_TIMEOUT)
+            return True
+        except OSError:
+            return False
+
     def _sse_loop(self, conn, base):
         posted = False
         event_name = ""
+        event_bytes = 0
         try:
-            while self._sse_run.is_set():
-                line = conn.readline()
-                if not line:
+            for raw in self._iter_sse_lines(conn):
+                if not self._sse_run.is_set():
                     break
-                if isinstance(line, bytes):
-                    line = line.decode("utf-8", "replace")
+                if isinstance(raw, bytes):
+                    line = raw.decode("utf-8", "replace")
+                else:
+                    line = raw
                 line = line.rstrip("\r\n")
-                if not line or line.startswith(":"):
+                if not line:
+                    event_name = ""
+                    event_bytes = 0
+                    continue
+                if line.startswith(":"):
                     continue
                 if not line.startswith("event:") and not line.startswith("data:"):
                     continue
+                event_bytes += len(line)
+                if event_bytes > MAX_SSE_EVENT_BYTES:
+                    raise HttpError(0, "SSE event exceeds size limit", KIND_NETWORK)
                 if line.startswith("event:"):
                     event_name = line[len("event:"):].strip()
                     continue
@@ -530,6 +612,7 @@ class Bridge:
                         self._post_tracked(base, self._tracked_names)
                         posted = True
                     event_name = ""
+                    event_bytes = 0
                     continue
                 if not data:
                     continue
@@ -538,10 +621,16 @@ class Bridge:
                 except ValueError:
                     self._log("error", "unparsable SSE data frame")
                     event_name = ""
+                    event_bytes = 0
                     continue
                 if isinstance(payload, dict):
+                    if len(payload) > MAX_SSE_RECORDS:
+                        raise HttpError(0, "SSE state map exceeds record limit", KIND_NETWORK)
                     self._handle_state_map(payload)
                 event_name = ""
+                event_bytes = 0
+        except HttpError as exc:
+            self._log("error", "SSE stream error: %s" % redact_for_log(str(exc)))
         except Exception as exc:
             self._log("error", "SSE stream error: %s" % redact_for_log(str(exc)))
         finally:
@@ -556,6 +645,34 @@ class Bridge:
             elif self._want_connect and self._mode == "remote":
                 self._set_phase("error", "connection lost", KIND_NETWORK)
                 self._schedule_reconnect()
+
+    def _iter_sse_lines(self, conn, max_line=MAX_SSE_LINE_BYTES):
+        """Yield SSE lines bounded to `max_line` bytes, reading via read1.
+
+        readline() would buffer an unbounded amount if a hostile endpoint
+        never sent a newline; read1() caps each underlying recv and we check
+        the accumulated buffer against the limit on every pass.
+        """
+        buf = bytearray()
+        while True:
+            nl = buf.find(b"\n")
+            if nl >= 0:
+                if nl > max_line:
+                    raise HttpError(0, "SSE line exceeds size limit", KIND_NETWORK)
+                yield bytes(buf[:nl])
+                del buf[:nl + 1]
+                continue
+            if len(buf) > max_line:
+                raise HttpError(0, "SSE line exceeds size limit", KIND_NETWORK)
+            try:
+                chunk = conn.read1(65536)
+            except (urllib.error.URLError, OSError, ssl.SSLError):
+                raise HttpError(0, "SSE stream read failed", KIND_NETWORK)
+            if not chunk:
+                if buf:
+                    yield bytes(buf)
+                return
+            buf += chunk
 
     def _post_tracked(self, base, names):
         if not names:

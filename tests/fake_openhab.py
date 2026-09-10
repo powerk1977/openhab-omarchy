@@ -56,6 +56,7 @@ class FakeOpenHAB:
         self.conn_count = 0
         self.last_event_type = None
         self.accept_tracking = True  # fail a POST /rest/events/states/{id}
+        self.huge_sse_line = False  # send an over-long SSE line (no newline first)
 
     def push(self, name, state):
         """Simulate openHAB pushing a state change out the tracked stream."""
@@ -164,6 +165,9 @@ class FakeOpenHAB:
                 self.send_header("Connection", "keep-alive")
                 self.send_header("X-Accel-Buffering", "no")
                 self.end_headers()
+                if server.huge_sse_line:
+                    self.wfile.write(b"x" * 262200 + b"\n")
+                    self.wfile.flush()
                 # ready frame
                 self.wfile.write(b"event: ready\ndata: " + conn_id.encode() + b"\n\n")
                 self.wfile.flush()
