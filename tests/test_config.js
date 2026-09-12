@@ -99,6 +99,12 @@ check("selectedTab parsed", r.config.selectedTab === "area:Kitchen")
 r = C.parse(JSON.stringify({ groupByArea: true }))
 check("groupByArea true", r.config.groupByArea === true)
 
+// panelSelection (Favorites-first section chooser)
+r = C.parse(JSON.stringify({}))
+check("panelSelection defaults to favorites", r.config.panelSelection === "favorites")
+r = C.parse(JSON.stringify({ panelSelection: "area:Kitchen" }))
+check("panelSelection parsed", r.config.panelSelection === "area:Kitchen")
+
 // serialize round-trips
 const s = C.serialize({ baseUrl: "x", localUrl: "", trustedNetwork: "", demoMode: true, expandedEquipment: [] })
 const back = C.parse(s)
@@ -107,10 +113,13 @@ check("serialize round-trip", back.config.baseUrl === "x" && back.config.demoMod
 // merge carries the new keys
 const mbase = { baseUrl: "a", demoMode: false, favorites: [], panelOrder: [],
                 demoFavorites: [], demoPanelOrder: [], groupByArea: false,
-                selectedTab: "favorites", localUrl: "", trustedNetwork: "",
+                selectedTab: "favorites", panelSelection: "favorites",
+                localUrl: "", trustedNetwork: "",
                 expandedEquipment: [] }
 const m = C.merge(mbase, { groupByArea: true })
 check("merge applies new key", m.groupByArea === true && m.selectedTab === "favorites")
+const m2 = C.merge(mbase, { panelSelection: "area:Kitchen" })
+check("merge applies panelSelection", m2.panelSelection === "area:Kitchen" && m2.selectedTab === "favorites")
 
 console.log("\npython-style summary: %d passed, %d failed", passed, failed)
 process.exit(failed ? 1 : 0)

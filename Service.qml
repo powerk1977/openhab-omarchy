@@ -83,6 +83,7 @@ QtObject {
       demoPanelOrder: root.demoPanelOrder.slice(),
       groupByArea: root.groupByArea,
       selectedTab: root.activeTab,
+      panelSelection: root.panelSelection,
       expandedEquipment: root.expandedEquipment.slice()
     }
   }
@@ -105,6 +106,12 @@ QtObject {
   property var tabs: [{ id: "favorites", title: "Favorites", itemNames: [] }]
   property int tabsRevision: 0
 
+  // Which view the grouped list shows: "favorites" (everything, grouped) or a
+  // single location's areaName (only that location's items). The choices the
+  // section chooser offers stay in sync with the locations that exist.
+  property string panelSelection: "favorites"
+  property var panelChoices: []
+
   // What is actually shown right now. Area tabs exist only when grouping is on
   // and items map to them; a saved selection that does not exist yet falls
   // back to the first tab without overwriting the intent.
@@ -118,7 +125,7 @@ QtObject {
 
   property Timer selectedTabSaveDebounce: Timer {
     interval: 300
-    onTriggered: root.saveConfig({ selectedTab: root.activeTab })
+    onTriggered: root.saveConfig({ selectedTab: root.activeTab, panelSelection: root.panelSelection })
   }
 
   function toggleFavorite(itemName) {
@@ -167,6 +174,13 @@ QtObject {
   function setActiveTab(tabId) {
     if (root.activeTab === tabId) return
     root.activeTab = tabId
+    root.rebuildRows()
+    selectedTabSaveDebounce.restart()
+  }
+
+  function setPanelSelection(value) {
+    if (root.panelSelection === value) return
+    root.panelSelection = value
     root.rebuildRows()
     selectedTabSaveDebounce.restart()
   }
@@ -378,6 +392,7 @@ QtObject {
     root.demoPanelOrder = config.demoPanelOrder
     root.groupByArea = config.groupByArea
     root.activeTab = config.selectedTab
+    root.panelSelection = config.panelSelection
 
     root.configured = root.demoMode || root.baseUrl.length > 0
     root.rebuildRows()
@@ -831,27 +846,66 @@ QtObject {
     root.tabs = root.computeTabs()
     root.tabsRevision++
 
-    // The saved tab is the intent; a stale area selection (no items there
-    // yet, or items moved) falls back to the first existing tab without
-    // overwriting the saved choice.
-    var effective = root.tabs.length ? root.tabs[0].id : "favorites"
-    for (var i = 0; i < root.tabs.length; i++) {
-      if (root.tabs[i].id === root.activeTab) {
-        effective = root.activeTab
-        break
+    rows.clear()
+
+    var picked = root.panelOrder.slice()
+    if (!root.groupByArea) {
+      for (var f = 0; f < picked.length; f++) {
+        rows.append(RowModel.project(root.rowDescriptor(picked[f])))
       }
-    }
-    var itemNames = root.tabs[0] && root.tabs[0].itemNames
-    for (var n = 0; n < root.tabs.length; n++) {
-      if (root.tabs[n].id === effective) {
-        itemNames = root.tabs[n].itemNames
-        break
-      }
+      root.panelChoices = []
+      return
     }
 
-    rows.clear()
-    for (var k = 0; k < itemNames.length; k++) {
-      rows.append(RowModel.project(root.rowDescriptor(itemNames[k])))
+    var groups = root.groupsForPicks(picked)
+    var choices = [{ value: "favorites", label: "Favorites" }]
+    for (var c = 0; c < groups.length; c++) {
+      choices.push({ value: groups[c].areaName, label: groups[c].label })
     }
+    root.panelChoices = choices
+
+    // A saved location view that no longer exists falls back to Favorites
+    // without overwriting the intent.
+    var view = "favorites"
+    for (var v = 0; v < groups.length; v++) {
+      if (groups[v].areaName === root.panelSelection) { view = groups[v].areaName; break }
+    }
+
+    for (var g = 0; g < groups.length; g++) {
+      var group = groups[g]
+      if (view !== "favorites" && group.areaName !== view) continue
+      if (view === "favorites") {
+        rows.append(RowModel.project({
+          rowKind: group.rowKind,
+          areaName: group.areaName,
+          label: group.label
+        }))
+      }
+      var names = group.itemNames
+      for (var p = 0; p < names.length; p++) {
+        rows.append(RowModel.project(root.rowDescriptor(names[p])))
+      }
+    }
+  }
+
+  function groupsForPicks(picked) {
+    function areaLabelFor(area) {
+      var item = root.entityStore.item(area)
+      return (item && typeof item.name === "string") ? item.name : area
+    }
+    function areaFor(itemName) {
+      var item = root.entityStore.item(itemName)
+      return (item && root.entityStore.areaNameFor(item)) || "__aOther__"
+    }
+
+    var labels = {}
+    var locs = root.entityStore.orderedLocations()
+    for (var l = 0; l < locs.length; l++) labels[locs[l].name] = locs[l].label
+    labels["__aOther__"] = "Other"
+    var areaLabel = function(area) { return labels[area] || areaLabelFor(area) }
+
+    var ordered = []
+    for (var o = 0; o < locs.length; o++) ordered.push(locs[o].name)
+    return RowModel.groupPanelItems(picked, areaFor, ordered, areaLabel, "__aOther__")
   }
 }

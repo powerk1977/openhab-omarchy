@@ -135,5 +135,29 @@ store3.pushStates({ "Desk_Lamp": { state: "ON", type: "OnOff" } })
 check("fallback entity indexed", store3.item("Desk_Lamp") !== null)
 check("fallback sorted index includes it", store3.sortedItemNames().join(",") === "Desk_Lamp")
 
+// --- groupPanelItems (grouped-list panel order)
+// areaFor mirrors Service.rebuildRows: unmapped items become `__aOther__`.
+const pick2 = ["LivingRoom_Ceiling_Dimmer", "Outside_Flood_Switch", "CoffeeMaker"]
+function areaFor2(name) {
+  if (name.indexOf("LivingRoom") === 0) return "LivingRoom"
+  if (name.indexOf("Outside") === 0) return "Outside"
+  return "__aOther__"
+}
+function labelFor2(area) {
+  if (area === "LivingRoom") return "Living Room"
+  if (area === "Outside") return "Outdoor"
+  if (area === "__aOther__") return "Other"
+  return area
+}
+const groups = R.groupPanelItems(pick2, areaFor2, ["LivingRoom", "Outside"], labelFor2, "__aOther__")
+check("groupPanelItems groups known locations first in order", groups.slice(0, 2).map(function(g) { return g.areaName }).join(",") === "LivingRoom,Outside")
+check("groupPanelItems marks location rows", groups[0].rowKind === "location" && groups[0].label === "Living Room", groups[0].label)
+check("groupPanelItems carries items in picked order", groups[0].itemNames.join(",") === "LivingRoom_Ceiling_Dimmer")
+check("groupPanelItems puts otherArea last", groups[groups.length - 1].areaName === "__aOther__"
+      && groups[groups.length - 1].label === "Other"
+      && groups[groups.length - 1].itemNames.join(",") === "CoffeeMaker")
+check("groupPanelItems sorts rest by label", R.groupPanelItems(["m2", "m1"], function(n) { return "A" + n }, [], function(a) { return a }).map(function(x) { return x.itemNames.join(",") }).join("|") === "m1|m2")
+check("groupPanelItems empty picks", R.groupPanelItems([], function() { return "" }, [], function() { return "" }).length === 0)
+
 console.log("\npython-style summary: %d passed, %d failed", passed, failed)
 process.exit(failed ? 1 : 0)

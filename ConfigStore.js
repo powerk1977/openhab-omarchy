@@ -6,7 +6,7 @@
 var KEYS = [
   "baseUrl", "localUrl", "trustedNetwork", "demoMode",
   "favorites", "demoFavorites", "panelOrder", "demoPanelOrder",
-  "groupByArea", "selectedTab",
+  "groupByArea", "selectedTab", "panelSelection",
   "expandedEquipment"
 ]
 
@@ -93,6 +93,8 @@ function parse(text, demoDefaults) {
       groupByArea: raw.groupByArea === true,
       selectedTab: typeof raw.selectedTab === "string" && raw.selectedTab
         ? raw.selectedTab : "favorites",
+      panelSelection: typeof raw.panelSelection === "string" && raw.panelSelection
+        ? raw.panelSelection : "favorites",
       expandedEquipment: itemList(raw.expandedEquipment)
     }
   }
