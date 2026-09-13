@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "author": "powerk1977",
   "license": "MIT",
-  "description": "View and control openHAB items from the Omarchy bar.",
+  "description": "View and control openHAB items from the Omarchy bar — scenes, favorites, and a pop-out window.",
   "kinds": [
     "service",
     "bar-widget",
@@ -19,7 +19,7 @@
   },
   "barWidget": {
     "displayName": "openHAB",
-    "description": "Location-grouped control of openHAB lights and switches.",
+    "description": "Location-grouped openHAB lights, switches, and scenes, with a favorites view and pop-out window.",
     "category": "Home",
     "aliases": [
       "openhab",
