@@ -3,6 +3,9 @@
 Speaks the exact contract this plugin consumes:
 
   GET  /rest/items?recursive=false        -> inventory array
+  GET  /rest/rules                        -> rule array (scenes are Scene-tagged)
+  GET  /rest/rules/{uid}                  -> single rule with current status
+  POST /rest/rules/{uid}/runnow           -> execute scene rule
   GET  /rest/events/states                -> SSE stream (ready then tracked maps)
   POST /rest/events/states/{connId}       -> start tracking a list of items
   POST /rest/items/{name}                 -> command (body = command string)
@@ -25,17 +28,23 @@ BASE_CONTENT = [
      "metadata": {"semantics": {"value": "Location_Indoor"}}, "groupNames": []},
     {"name": "Living_Room_Ceiling", "type": "Group", "label": "Ceiling", "state": "",
      "metadata": {"semantics": {"value": "Equipment_LightSource_Bulb",
-                                "config": {"hasLocation": "Living_Room"}}}, "groupNames": []},
+                                 "config": {"hasLocation": "Living_Room"}}}, "groupNames": []},
     {"name": "Living_Room_Ceiling_Dimmer", "type": "Dimmer", "label": "Ceiling Lamp",
      "state": "60",
      "metadata": {"semantics": {"value": "Point_Control_Percentage",
-                                "config": {"isPointOf": "Living_Room_Ceiling"}}}, "groupNames": []},
+                                 "config": {"isPointOf": "Living_Room_Ceiling"}}}, "groupNames": []},
     {"name": "Kitchen_Island_Switch", "type": "Switch", "label": "Island Lights",
      "state": "ON",
      "metadata": {"semantics": {"value": "Point_Control_OnOff"}}, "groupNames": []},
     {"name": "Office_Desk_Pendant_Color", "type": "Color", "label": "Desk Pendant",
      "state": "200,100,80",
      "metadata": {"semantics": {"value": "Point_Control_Color"}}, "groupNames": []},
+]
+
+BASE_RULES = [
+    {"uid": "Good_Morning", "name": "Morning", "tags": ["Scene"], "enabled": True},
+    {"uid": "16e7ecd964", "name": "Evening", "tags": ["Scene"], "enabled": True},
+    {"uid": "Schedule_Away", "name": "Away", "tags": ["Schedule"], "enabled": True},
 ]
 
 
@@ -52,6 +61,10 @@ class FakeOpenHAB:
         # the username-form API token (token:).
         self.auth = auth
         self.items = {i["name"]: dict(i) for i in (items or BASE_CONTENT)}
+        self.rules = {r["uid"]: dict(r) for r in BASE_RULES}
+        self.runnow_calls = []  # uids POSTed to /rest/rules/{uid}/runnow
+        self.rule_status = {}   # uid -> status (RUNNING/IDLE)
+        self.runnow_delay = 0.2  # auto-clear delay in seconds; None to hold
         self.conn_events = {}
         self.conn_count = 0
         self.last_event_type = None
@@ -63,6 +76,10 @@ class FakeOpenHAB:
         conn = self.conn_events.get("stream")
         if conn:
             conn.send_frame({name: {"state": state, "type": state_type(self.items[name]["type"])}})
+
+    def set_rule_status(self, uid, status):
+        """Manually set a rule's status for testing completion polling."""
+        self.rule_status[uid] = status
 
     def http_thread_factory(self):
         server = self
@@ -113,6 +130,19 @@ class FakeOpenHAB:
                     else:
                         self._respond(200, list(server.items.values()))
                     return
+                if parsed.path == "/rest/rules":
+                    self._respond(200, list(server.rules.values()))
+                    return
+                if parsed.path.startswith("/rest/rules/"):
+                    uid = urllib.parse.unquote(parsed.path[len("/rest/rules/"):])
+                    rule = server.rules.get(uid)
+                    if rule is None:
+                        self._respond(404, {"error": "no rule"})
+                        return
+                    body = dict(rule)
+                    body["status"] = server.rule_status.get(uid, "IDLE")
+                    self._respond(200, body)
+                    return
                 if parsed.path == "/rest/events/states":
                     self._sse()
                     return
@@ -137,6 +167,25 @@ class FakeOpenHAB:
                     if conn_id in server.conn_events:
                         server.conn_events[conn_id].set_tracked(names)
                     self._respond(200, "OK")
+                    return
+                if parsed.path.startswith("/rest/rules/"):
+                    rest = parsed.path[len("/rest/rules/"):]
+                    if rest.endswith("/runnow"):
+                        uid = urllib.parse.unquote(rest[:-len("/runnow")])
+                        if uid in server.rules:
+                            server.runnow_calls.append(uid)
+                            server.rule_status[uid] = "RUNNING"
+                            delay = server.runnow_delay
+                            if delay is not None:
+                                threading.Timer(
+                                    delay,
+                                    lambda: server.rule_status.__setitem__(uid, "IDLE")
+                                ).start()
+                            self._respond(200, "OK")
+                        else:
+                            self._respond(404, {"error": "no rule"})
+                        return
+                    self._respond(404, {"error": "no rule"})
                     return
                 if parsed.path.startswith("/rest/items/"):
                     name = urllib.parse.unquote(parsed.path[len("/rest/items/"):])

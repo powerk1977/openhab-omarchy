@@ -25,8 +25,7 @@ var DEMO_DEFAULT_FAVORITES = [
 
 function cleaned(value) {
   if (typeof value !== "string") return ""
-  var trimmed = value.trim()
-  return trimmed.length ? trimmed : ""
+  return value.trim()
 }
 
 function typeOf(item) {
@@ -88,19 +87,6 @@ function brightnessOf(item) {
   return -1
 }
 
-function hsColor(item) {
-  if (!item || typeOf(item) !== "Color") return null
-  var parts = cleaned(item.state).split(",")
-  if (parts.length < 3) return null
-  var hue = Number(parts[0])
-  var saturation = Number(parts[1])
-  if (!isFinite(hue) || !isFinite(saturation)) return null
-  return {
-    hue: Math.min(Math.max(hue, 0), 360),
-    saturation: Math.min(Math.max(saturation, 0), 100)
-  }
-}
-
 // The command string a toggle sends for the current state.
 function toggleCommand(item, currentlyOn) {
   var type = typeOf(item)
@@ -119,11 +105,6 @@ function brightnessCommand(item, percent) {
 }
 
 // ---------------------------------------------------------------- display
-
-function capitalize(value) {
-  var text = String(value || "")
-  return text.length ? text.charAt(0).toUpperCase() + text.slice(1) : ""
-}
 
 function displayState(item) {
   if (!item) return ""
@@ -161,16 +142,6 @@ function subtitle(item) {
   if (type === "Contact") return displayState(item)
   if (LIGHT_TYPES.indexOf(type) !== -1) return displayState(item)
   return ""
-}
-
-function badgeText(item) {
-  if (!item) return "Unavailable"
-  if (isUnavailable(item)) return "Unavailable"
-  var type = typeOf(item)
-  if (type === "Player") return displayState(item)
-  if (LIGHT_TYPES.indexOf(type) !== -1) return displayState(item)
-  if (type === "Contact") return displayState(item)
-  return displayState(item)
 }
 
 // ------------------------------------------------------------ capabilities

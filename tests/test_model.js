@@ -70,7 +70,6 @@ check("displayState Dimmer 0", M.displayState(item("Dimmer", "0")) === "Off")
 check("displayState Contact", M.displayState(item("Contact", "OPEN")) === "Open")
 check("displayState Number UoM", M.displayState(item("Number:Temperature", "21.5 °C")) === "21.5 °C")
 check("displayState unavailable", M.displayState(item("Dimmer", "NULL")) === "Unavailable")
-check("badgeText Color", M.badgeText(item("Color", "200,100,80")) === "80%")
 
 // --- capabilities
 let cap = M.capabilitiesFor(item("Dimmer", "60"))

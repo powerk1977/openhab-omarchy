@@ -498,6 +498,66 @@ def test_sse_line_limit_end_to_end():
     return h
 
 
+def test_scene_rules():
+    """Scenes are rules tagged `Scene`; the bridge lists them on connect and
+    executes them via POST /rest/rules/{uid}/runnow."""
+    server = FakeOpenHAB(token="sekrit").start()
+    try:
+        h = Harness()
+        h.send({"op": "config", "generation": 9, "url": server.base, "token": "sekrit"})
+        # Scenes arrive before the SSE stream pulls the first state map.
+        ev = h.wait_for(lambda e: e.get("ev") == "scenes")
+        uids = sorted(s["uid"] for s in (ev or {}).get("items", []))
+        names = sorted(s["name"] for s in (ev or {}).get("items", []))
+        report("scenes: Scene-tagged rules listed",
+               ev is not None and uids == ["16e7ecd964", "Good_Morning"]
+               and names == ["Evening", "Morning"],
+               json.dumps(uids) if ev else "no scenes frame")
+        report("scenes: Schedule-tagged rule excluded",
+               ev is not None and "Schedule_Away" not in uids, json.dumps(uids))
+        while not h.wait_for(lambda e: e.get("ev") == "phase" and e.get("phase") == "connected"):
+            time.sleep(0.05)
+        h.drain()
+
+        h.send({"op": "runScene", "uid": "Good_Morning", "tag": "s1"})
+        ok, why = eq(h.wait_for(lambda e: e.get("ev") == "result" and e.get("tag") == "s1"),
+                     "result", tag="s1", success=True)
+        report("scenes: runnow accepted", ok and "Good_Morning" in server.runnow_calls, why)
+        h.drain()
+
+        # Test completion polling: configure server to hold the RUNNING status
+        # and verify the result only completes after the status is cleared.
+        server.runnow_delay = None
+        h.send({"op": "runScene", "uid": "Good_Morning", "tag": "s_poll"})
+        # Wait 0.8s (exceeds bridge floor of 0.6s) and check that no result has been emitted
+        time.sleep(0.8)
+        evs = h.events()
+        has_result = any(json.loads(line).get("ev") == "result" and json.loads(line).get("tag") == "s_poll"
+                         for line in evs if line.startswith("{"))
+        report("scenes: result delayed while rule is RUNNING", not has_result)
+
+        # Clear status to IDLE and verify result completes successfully
+        server.set_rule_status("Good_Morning", "IDLE")
+        ok, why = eq(h.wait_for(lambda e: e.get("ev") == "result" and e.get("tag") == "s_poll"),
+                     "result", tag="s_poll", success=True)
+        report("scenes: result arrives after rule status is IDLE", ok, why)
+        h.drain()
+
+        h.send({"op": "runScene", "uid": "No_Such_Rule", "tag": "s2"})
+        ok, why = eq(h.wait_for(lambda e: e.get("ev") == "result" and e.get("tag") == "s2"),
+                     "result", tag="s2", success=False)
+        report("scenes: unknown rule fails gracefully", ok, why)
+        h.drain()
+
+        h.send({"op": "refresh"})
+        ev = h.wait_for(lambda e: e.get("ev") == "scenes")
+        report("scenes: refresh re-lists", ev is not None)
+        h.close()
+    finally:
+        server.stop()
+    return h
+
+
 def main():
     tests = [
         test_demo_mode, test_live_connect, test_live_command_and_push,
@@ -507,7 +567,7 @@ def main():
         test_reconfig_reconnects, test_ssl_requires_verified_tls,
         test_trusted_network_gate,
         test_bounded_body_reads, test_sse_line_bounds,
-        test_sse_line_limit_end_to_end,
+        test_sse_line_limit_end_to_end, test_scene_rules,
     ]
     for test in tests:
         try:

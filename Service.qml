@@ -112,6 +112,27 @@ QtObject {
   property string panelSelection: "favorites"
   property var panelChoices: []
 
+  // Scene rules tagged `Scene` on the server (openHAB Settings -> Scenes).
+  // A scene is an action, not a view: the panel strip runs it and nothing
+  // stays selected. `scenes` is replaced wholesale by applyScenes, which is
+  // what the `hasScenes` binding can observe.
+  property var scenes: []
+  property int sceneRevision: 0
+  readonly property bool hasScenes: root.scenes.length > 0
+
+  // Pending scene runs. A scene is pending from the moment we send the
+  // runnow command until the bridge reports success (runnow result). The
+  // sweep timer catches any that never complete.
+  property var pendingScenes: ({})
+  property int pendingSceneRevision: 0
+  readonly property int pendingSceneTimeout: 6500
+  property Timer pendingSceneSweep: Timer {
+    interval: 250
+    repeat: true
+    running: root.hasPendingScenes()
+    onTriggered: root.sweepPendingScenes()
+  }
+
   // What is actually shown right now. Area tabs exist only when grouping is on
   // and items map to them; a saved selection that does not exist yet falls
   // back to the first tab without overwriting the intent.
@@ -183,6 +204,82 @@ QtObject {
     root.panelSelection = value
     root.rebuildRows()
     selectedTabSaveDebounce.restart()
+  }
+
+  // ------------------------------------------------------------ scenes
+  function applyScenes(list) {
+    var raw = Array.isArray(list) ? list : []
+    var cleaned = []
+    for (var c = 0; c < raw.length; c++) {
+      var scene = raw[c]
+      if (!scene || typeof scene.uid !== "string" || !scene.uid) continue
+      var name = String(scene.name || "").trim()
+      if (!name) name = scene.uid
+      cleaned.push({ uid: scene.uid, name: name, enabled: scene.enabled !== false })
+    }
+    cleaned.sort(function sortScenes(a, b) {
+      return String(a.name).toLowerCase().localeCompare(String(b.name).toLowerCase())
+    })
+    // A stale pending entry whose scene vanished can never be ack'd; drop it.
+    var alive = {}
+    for (var d = 0; d < cleaned.length; d++) alive[cleaned[d].uid] = true
+    for (var uid in root.pendingScenes) {
+      if (!alive[uid]) delete root.pendingScenes[uid]
+    }
+    if (root.hasPendingScenes()) pendingSceneSweep.running = true
+    root.scenes = cleaned
+    root.sceneRevision++
+  }
+
+  function hasPendingScenes() {
+    for (var key in root.pendingScenes) return true
+    return false
+  }
+
+  function scenePending(uid) {
+    return root.pendingScenes[uid] !== undefined
+  }
+
+  function setPendingScene(uid) {
+    root.pendingScenes[uid] = Date.now() + root.pendingSceneTimeout
+    root.pendingSceneRevision++
+    pendingSceneSweep.running = true
+  }
+
+  function clearPendingScene(uid) {
+    if (root.pendingScenes[uid] === undefined) return
+    delete root.pendingScenes[uid]
+    root.pendingSceneRevision++
+    if (!root.hasPendingScenes()) pendingSceneSweep.running = false
+  }
+
+  function sweepPendingScenes() {
+    var current = Date.now()
+    var expired = []
+    for (var uid in root.pendingScenes) {
+      if (root.pendingScenes[uid] <= current) expired.push(uid)
+    }
+    for (var i = 0; i < expired.length; i++) {
+      delete root.pendingScenes[expired[i]]
+    }
+    if (expired.length) root.pendingSceneRevision++
+    if (!root.hasPendingScenes()) pendingSceneSweep.running = false
+  }
+
+  function runScene(uid) {
+    var scene = null
+    for (var i = 0; i < root.scenes.length; i++) {
+      if (root.scenes[i].uid === uid) { scene = root.scenes[i]; break }
+    }
+    if (!scene) return root.rejectAction("Unknown scene.")
+    if (!scene.enabled) return root.rejectAction("This scene is disabled in openHAB.")
+    if (root.pendingScenes[uid] !== undefined) return false
+    root.setPendingScene(uid)
+    if (!root.send({ op: "runScene", uid: uid, tag: "scene:" + uid })) {
+      root.clearPendingScene(uid)
+      return false
+    }
+    return true
   }
 
   function saveConfig(patch) {
@@ -628,8 +725,6 @@ QtObject {
     })
   }
 
-  signal commandFailed(string tag)
-
   // Returns the tag to match a later failure against, or "" if nothing went out.
   function setItemTagged(itemName, command) {
     var tag = root.callTag(itemName)
@@ -692,6 +787,9 @@ QtObject {
       }
       root.applyStateChanged(delta)
       break
+    case "scenes":
+      root.applyScenes(event.items || [])
+      break
     case "result":
       root.handleResult(event)
       break
@@ -702,17 +800,25 @@ QtObject {
   }
 
   function handleResult(event) {
+    var tag = String(event.tag || "")
+    // Scene runs ack only through the runnow result (no statechanged frame
+    // follows), so the pending clear must happen on success too — not just
+    // on the failure path below.
+    if (tag.indexOf("scene:") === 0) {
+      root.clearPendingScene(tag.slice("scene:".length))
+      if (event.success === true) return
+      root.lastError = event.error || "Scene failed."
+      root.lastErrorKind = event.errorKind || "command"
+      return
+    }
     if (event.success === true) return
 
-    var tag = String(event.tag || "")
     if (tag.indexOf("toggle:") === 0) {
       // Drop the guess now rather than at the sweep timer. On success it
       // stays: the confirming statechanged is already on its way.
       var itemName = tag.slice("toggle:".length)
       root.clearPendingToggle(itemName)
       root.refreshRow(itemName)
-    } else if (tag.indexOf("item:") === 0) {
-      root.commandFailed(tag)
     }
     root.lastError = event.error || "Command failed."
     root.lastErrorKind = event.errorKind || "command"
@@ -759,10 +865,10 @@ QtObject {
     if (!item) {
       return {
         rowKind: "entity", itemName: itemName, name: itemName, subtitle: "",
-        badge: "", icon: Model.FALLBACK_ICON, type: "", isOn: false,
+        icon: Model.FALLBACK_ICON, isOn: false,
         pending: root.displayIsOn(itemName), available: false, controlKind: "none",
-        brightness: false, brightnessValue: -1, color: false,
-        areaName: "__aOther__", equipmentName: ""
+        brightness: false, brightnessValue: -1,
+        areaName: "__aOther__"
       }
     }
     var capabilities = Model.capabilitiesFor(item)
@@ -771,18 +877,14 @@ QtObject {
       itemName: item.name,
       name: root.entityStore.displayNameFor(item),
       subtitle: Model.subtitle(item),
-      badge: Model.badgeText(item),
       icon: root.entityStore.hasSemantics() ? Model.iconFor(item) : Model.FALLBACK_ICON,
-      type: item.type,
       isOn: root.displayIsOn(itemName),
       pending: root.pendingToggles[itemName] !== undefined,
       available: capabilities.available,
       controlKind: capabilities.toggle ? "toggle" : "none",
       brightness: capabilities.brightness,
       brightnessValue: capabilities.brightness ? Model.brightnessOf(item) : -1,
-      color: capabilities.color,
-      areaName: root.entityStore.areaNameFor(item) || "__aOther__",
-      equipmentName: item.pointOf || ""
+      areaName: root.entityStore.areaNameFor(item) || "__aOther__"
     }
   }
 

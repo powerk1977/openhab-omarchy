@@ -118,10 +118,9 @@ check("empty picks -> favorites only even when grouped", store.computeTabs([], t
 // --- RowModel projection
 const projected = R.project({
   rowKind: "entity", itemName: "LivingRoom_Ceiling_Dimmer", name: "Ceiling",
-  subtitle: "70%", badge: "", icon: "x", type: "Dimmer", isOn: true,
+  subtitle: "70%", icon: "x", isOn: true,
   pending: false, available: true, controlKind: "toggle",
-  brightness: true, brightnessValue: 70, color: false,
-  areaName: "LivingRoom", equipmentName: "LivingRoom_Ceiling"
+  brightness: true, brightnessValue: 70, areaName: "LivingRoom"
 })
 check("rowmodel carries fields", projected.itemName === "LivingRoom_Ceiling_Dimmer" && projected.name === "Ceiling")
 check("rowmodel flag coercion", projected.brightness === true && projected.isOn === true)

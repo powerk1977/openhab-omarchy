@@ -6,11 +6,11 @@
 
 // Row requirements at a glance (kept in sync with Panel.qml):
 //   location row: rowKind "location", areaName, label
-//   entity row:   rowKind "entity", itemName, name, subtitle, badge, icon,
-//                 type, isOn, pending, available, controlKind, brightness,
-//                 brightnessValue, color, areaName, equipmentName
+//   entity row:   rowKind "entity", itemName, name, subtitle, icon, isOn,
+//                 pending, available, controlKind, brightness, brightnessValue,
+//                 areaName
 
-function project(entity, context) {
+function project(entity) {
   var row = {
     rowKind: entity.rowKind || "entity",
     areaName: entity.areaName || "",
@@ -18,17 +18,13 @@ function project(entity, context) {
     itemName: entity.itemName || "",
     name: entity.name || "",
     subtitle: entity.subtitle || "",
-    badge: entity.badge || "",
     icon: entity.icon || "",
-    type: entity.type || "",
     isOn: !!entity.isOn,
     pending: !!entity.pending,
     available: !!entity.available,
     controlKind: entity.controlKind || "none",
     brightness: !!entity.brightness,
-    brightnessValue: typeof entity.brightnessValue === "number" ? entity.brightnessValue : -1,
-    color: !!entity.color,
-    equipmentName: entity.equipmentName || ""
+    brightnessValue: typeof entity.brightnessValue === "number" ? entity.brightnessValue : -1
   }
   return row
 }

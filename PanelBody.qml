@@ -52,6 +52,19 @@ Item {
     readonly property bool stateNothingPinned: root.serviceReady && root.oh.configured && root.hasDevices && root.rowCount === 0
     readonly property bool listShown: root.serviceReady && root.oh.configured && root.hasDevices && root.rowCount > 0
 
+    // Rotating home-automation sayings shown in the hero meta line while
+    // connected — the same treatment as the bluetooth panel's hero status
+    // line. Non-connected phases keep their plain status text.
+    property int phraseIndex: 0
+    readonly property var heroSayings: [
+        "Running Scenes",
+        "Connecting Hubs",
+        "Dimming Lights",
+        "Toggling Switches"
+    ]
+    readonly property bool rotatingSayings: root.serviceReady
+        && root.oh.configured && root.phase === "connected"
+
     readonly property var heroMeta: {
         if (!serviceReady)
             return "Service unavailable";
@@ -59,7 +72,8 @@ Item {
             return "Not connected";
         switch (phase) {
         case "connected":
-            return (oh.demoMode ? "Demo · " : "") + oh.itemCount + " items";
+            return (oh.demoMode ? "Demo · " : "")
+                + root.heroSayings[root.phraseIndex % root.heroSayings.length];
         case "connecting":
             return oh.lastError ? "Retrying" : "Connecting…";
         case "error":
@@ -69,7 +83,7 @@ Item {
         }
     }
 
-    // The section chooser is Favorites-first; the service keeps the option
+    // The items chooser is Favorites-first; the service keeps the option
     // list in sync with the locations that actually exist. A stale saved
     // selection (location no longer listed) falls back to Favorites for the
     // trigger, so the dropdown never shows a blank value.
@@ -83,6 +97,10 @@ Item {
         return "favorites";
     }
     readonly property bool chooserShown: root.grouped && root.panelChoices.length > 1
+
+    // Scene chips (when the server has Scene-tagged rules) sit between the
+    // separator and the items chooser; the strip collapses entirely when none.
+    readonly property bool sceneBandShown: root.serviceReady && root.oh && root.oh.hasScenes === true
 
     // The host keycatcher suspends itself while the dropdown owns the keys.
     readonly property bool blockedKeys: chooser && chooser.popupOpen
@@ -102,21 +120,31 @@ Item {
     readonly property int contentImplicitHeight: {
         var h = heroBand.implicitHeight
         h += Style.spacing.panelGap + sepBand.implicitHeight
+        if (sceneBand.visible)
+            h += Style.spacing.panelGap + sceneBand.implicitHeight
+        if (sceneBand.visible)
+            h += Style.spacing.panelGap + itemsDivider.implicitHeight
         if (chooser.visible)
             h += Style.spacing.panelGap + chooser.implicitHeight
         h += Style.spacing.panelGap + root.regionNaturalHeight
         return h
     }
 
-    // Cursor state, owned per surface.
+    // Cursor state, owned per surface. The scene strip is index -1 of the
+    // same cursor column: when cursorInScenes the strip owns the cursor and
+    // Left/Right move between chips, Down lands on the first entity row.
     property int cursorIndex: 0
     property bool cursorActive: false
+    property bool cursorInScenes: false
+    property int sceneActiveIndex: 0
     property string expandedItemName: ""
 
     function resetCursor() {
         cursorIndex = 0;
         cursorActive = false;
+        cursorInScenes = false;
         expandedItemName = "";
+        clampSceneIndex();
     }
 
     function isHeaderIndex(i) {
@@ -165,6 +193,85 @@ Item {
     function toggleRowExpansion(itemName, currentlyExpanded) {
         expandedItemName = currentlyExpanded ? "" : itemName;
         cursorIndex = 0;
+    }
+
+    // Keyboard routing for both surfaces. The shared cursor walks a single
+    // column: the scene strip (index -1) at the top, then the entity rows.
+    function moveRequested(dx, dy) {
+        if (dx === 0 && dy === 0) return;
+        if (!root.cursorActive) {
+            root.focusLand();
+            return;
+        }
+        if (dy > 0) {
+            if (root.cursorInScenes) {
+                root.cursorInScenes = false;
+                root.cursorIndex = root.firstEntityIndex();
+            } else {
+                root.moveCursor(1);
+            }
+            return;
+        }
+        if (dy < 0) {
+            if (root.cursorInScenes) return;
+            if (root.sceneBandShown && root.cursorIndex === root.firstEntityIndex()) {
+                root.cursorInScenes = true;
+                return;
+            }
+            root.moveCursor(-1);
+            return;
+        }
+        // Horizontal only matters on the strip.
+        if (root.cursorInScenes)
+            root.nudgeActiveScene(dx);
+    }
+
+    // Move the chip selection by one, skipping disabled scenes and wrapping.
+    function nudgeActiveScene(dx) {
+        if (!root.sceneBandShown) return;
+        var list = root.oh.scenes;
+        var n = list.length;
+        if (n === 0) return;
+        var step = dx > 0 ? 1 : -1;
+        var next = root.sceneActiveIndex;
+        for (var i = 0; i < n; i++) {
+            next += step;
+            if (next < 0) next = n - 1;
+            if (next >= n) next = 0;
+            if (list[next].enabled) {
+                root.sceneActiveIndex = next;
+                return;
+            }
+        }
+    }
+
+    // Run whichever chip is selected (Enter when the strip owns the cursor).
+    function runActiveScene() {
+        if (!root.sceneBandShown) return;
+        var list = root.oh.scenes;
+        var index = Math.min(Math.max(root.sceneActiveIndex, 0), list.length - 1);
+        root.oh.runScene(list[index].uid);
+    }
+
+    // When the scene list shrinks, keep the selected chip in range and drop
+    // the strip cursor if there are no scenes left.
+    function clampSceneIndex() {
+        var n = root.oh && root.oh.scenes ? root.oh.scenes.length : 0;
+        if (root.sceneActiveIndex >= n) root.sceneActiveIndex = Math.max(0, n - 1);
+        if (!n) root.cursorInScenes = false;
+    }
+
+    // Mouse mirrors the cursor: hovering a chip selects it and moves the
+    // shared cursor up onto the strip.
+    function handleSceneHover(index) {
+        root.sceneActiveIndex = index;
+        root.cursorActive = true;
+        root.cursorInScenes = true;
+    }
+
+    function handleSceneActivate(index) {
+        root.sceneActiveIndex = index;
+        root.runActiveScene();
     }
 
     // ---------- hero ----------
@@ -217,15 +324,98 @@ Item {
         foreground: root.fg
     }
 
-    // ---------- section chooser ----------
-    Dropdown {
-        id: chooser
+    // Rotate the hero meta sayings with a fade-out/in, mirroring the
+    // bluetooth panel's rotating hero status line. Timers in the common
+    // namespace are fine: connected phase is what gates the rotation.
+    Timer {
+        id: phraseTimer
+        interval: 2800
+        running: root.rotatingSayings
+        repeat: true
+        onTriggered: phraseSwap.restart()
+    }
+
+    SequentialAnimation {
+        id: phraseSwap
+        PropertyAnimation {
+            target: heroBand
+            property: "metaOpacity"
+            to: 0.0
+            duration: 180
+            easing.type: Easing.OutQuad
+        }
+        ScriptAction {
+            script: root.phraseIndex = (root.phraseIndex + 1) % root.heroSayings.length
+        }
+        PropertyAnimation {
+            target: heroBand
+            property: "metaOpacity"
+            to: 1.0
+            duration: 260
+            easing.type: Easing.InQuad
+        }
+    }
+
+    Connections {
+        target: root
+        function onRotatingSayingsChanged() {
+            if (!root.rotatingSayings) {
+                phraseSwap.stop()
+                heroBand.metaOpacity = 1.0
+            }
+        }
+    }
+
+    // ---------- scene chips ----------
+    // Action-only strip: runs a scene, nothing stays selected. Sits flush with
+    // the left edge so it shares the Items dropdown's line; collapses entirely
+    // when the server has no scenes.
+    SceneStrip {
+        id: sceneBand
         anchors.top: sepBand.bottom
         anchors.topMargin: Style.spacing.panelGap
         anchors.left: parent.left
         anchors.right: parent.right
+        visible: root.sceneBandShown
+        oh: root.oh
+        bar: root.bar
+        foreground: root.fg
+        foregroundDim: root.dim
+        fontFamily: root.family
+        activeIndex: root.sceneActiveIndex
+        cursorOn: root.cursorInScenes
+        onChipHovered: function(index) { root.handleSceneHover(index) }
+        onChipActivated: function(index) { root.handleSceneActivate(index) }
+    }
+
+    // Keep the strip cursor in range when the scene list mutates.
+    Connections {
+        target: root.oh
+        ignoreUnknownSignals: true
+        function onSceneRevisionChanged() { root.clampSceneIndex() }
+    }
+
+    // Section divider between the scenes band and the items chooser, the
+    // same full-width treatment the bluetooth panel uses between sections.
+    PanelSeparator {
+        id: itemsDivider
+        anchors.top: sceneBand.bottom
+        anchors.topMargin: Style.spacing.panelGap
+        anchors.left: parent.left
+        anchors.right: parent.right
+        visible: root.sceneBandShown
+        foreground: root.fg
+    }
+
+    // ---------- items chooser ----------
+    Dropdown {
+        id: chooser
+        anchors.top: itemsDivider.visible ? itemsDivider.bottom : sepBand.bottom
+        anchors.topMargin: Style.spacing.panelGap
+        anchors.left: parent.left
+        anchors.right: parent.right
         visible: root.chooserShown
-        label: "View"
+        label: "Items"
         options: root.panelChoices
         value: root.selectedView
         foreground: root.fg
@@ -273,6 +463,7 @@ Item {
                         onCursorRequested: {
                             root.cursorActive = true;
                             root.cursorIndex = index;
+                            root.cursorInScenes = false;
                         }
                         onExpandToggled: {
                             root.toggleRowExpansion(itemName, expanded);

@@ -14,10 +14,8 @@
 function makeStore(Model) {
   // items: name -> { name, type, label, category, tags, groupNames, group,
   //                  state, pointOf, locationFromConfig, semantics }
-  // states: name -> { state, type } as pushed by the tracked-states SSE map.
   // Prototype-free: item names are server-controlled identifiers.
   var items = Object.create(null)
-  var states = Object.create(null)
 
   function cleaned(value) {
     if (typeof value !== "string") return ""
@@ -44,7 +42,6 @@ function makeStore(Model) {
 
   function reset() {
     items = {}
-    states = {}
     lastNames = []
   }
 
@@ -101,11 +98,9 @@ function makeStore(Model) {
       if (!item) continue
       if (dto && typeof dto.state === "string") {
         item.state = dto.state
-        states[name] = { state: dto.state, type: cleaned(dto.type) }
       } else if (typeof dto === "string") {
         // A plain "name":"state" frame (stricter/older servers).
         item.state = dto
-        states[name] = { state: dto, type: "" }
       }
       names.push(name)
     }

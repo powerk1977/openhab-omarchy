@@ -27,6 +27,7 @@ bridge owns the single live SSE connection; QML owns nothing network-related.
 import base64
 import json
 import re
+import socket
 import ssl
 import sys
 import threading
@@ -47,7 +48,7 @@ MAX_SSE_LINE_BYTES = 256 * 1024          # per SSE line
 MAX_SSE_EVENT_BYTES = 8 * 1024 * 1024    # per logical SSE event
 MAX_SSE_RECORDS = 1_000_000              # entries in one state map
 
-from oh_bridge_helpers import current_wifi_ssid, network_trusted, redact_for_log  # noqa: E402
+from oh_bridge_helpers import network_trusted, redact_for_log  # noqa: E402
 
 
 def normalize_secret(raw):
@@ -91,20 +92,19 @@ def auth_header(kind, user, secret=""):
 
 
 class HttpError(Exception):
-    def __init__(self, code, reason, kind=KIND_NETWORK, body=b""):
+    def __init__(self, code, reason, kind=KIND_NETWORK):
         super().__init__("%s %s" % (code, reason))
         self.code = code
         self.reason = reason
         self.kind = kind
-        self.body = body
 
 
 class Http:
     """TLS-verified, proxy-bypassed, no-compression-opting HTTP client."""
 
     def __init__(self, token):
-        self._cred_kind, self._cred_user, self._cred_secret = normalize_credential(token)
-        self._token = auth_header(self._cred_kind, self._cred_user, self._cred_secret)
+        kind, user, secret = normalize_credential(token)
+        self._token = auth_header(kind, user, secret)
         ctx = ssl.create_default_context()
         self._opener = urllib.request.build_opener(
             urllib.request.HTTPSHandler(context=ctx),
@@ -127,8 +127,7 @@ class Http:
             res = self._opener.open(req, timeout=timeout)
         except urllib.error.HTTPError as exc:
             kind = KIND_AUTH if exc.code == 401 else KIND_NETWORK
-            raise HttpError(exc.code, exc.reason or "", kind,
-                            self._read_bounded(exc, max_body))
+            raise HttpError(exc.code, exc.reason or "", kind)
         except (urllib.error.URLError, OSError, ssl.SSLError) as exc:
             if isinstance(exc, ssl.SSLError):
                 raise HttpError(0, "TLS error", KIND_SSL)
@@ -322,14 +321,6 @@ class Bridge:
             except (BrokenPipeError, OSError):
                 pass
 
-    def _phase_event(self, phase, error="", error_kind=""):
-        event = {"ev": "phase", "phase": phase, "generation": self._generation}
-        if error:
-            event["error"] = error
-        if error_kind:
-            event["errorKind"] = error_kind
-        self.emit(event)
-
     def _result(self, tag, ok, error=""):
         self.emit({"ev": "result", "tag": tag, "success": ok, "error": error,
                    "generation": self._generation})
@@ -369,6 +360,8 @@ class Bridge:
             self._handle_refresh()
         elif op == "setItem":
             self._handle_set_item(msg)
+        elif op == "runScene":
+            self._handle_run_scene(msg)
         elif op == "shutdown":
             self.emit({"ev": "exited", "reason": "shutdown"})
             sys.exit(0)
@@ -462,6 +455,57 @@ class Bridge:
         threading.Thread(target=self._set_item_http,
                          args=(name, command, tag), daemon=True).start()
 
+    def _handle_run_scene(self, msg):
+        uid = str(msg.get("uid") or "")
+        tag = str(msg.get("tag") or "")
+        if not uid:
+            self._result(tag, False, "scene uid required")
+            return
+        # Scenes are a live-only feature: `--demo` never emits a scenes list
+        # (see _handle_refresh), so there is nothing to run here. Reject
+        # defensively rather than crash the reader thread on a missing method.
+        if self._mode == "demo":
+            self._result(tag, False, "scenes require a live openHAB instance")
+            return
+        threading.Thread(target=self._run_scene_http,
+                         args=(uid, tag), daemon=True).start()
+
+    def _run_scene_http(self, uid, tag):
+        base = self._resolved_url()
+        quoted = urllib.parse.quote(uid, safe="")
+        try:
+            self._http.request(base + "/rest/rules/" + quoted + "/runnow",
+                               method="POST", body=b"{}",
+                               ctype="application/json", timeout=8.0)
+        except HttpError as exc:
+            self._result(tag, False, exc.reason or "scene run failed")
+            return
+        except Exception as exc:
+            self._log("error", "scene run failed: %s" % redact_for_log(str(exc)))
+            self._result(tag, False, "scene run failed")
+            return
+        # runnow only queues the run. Poll the rule's status until it leaves
+        # RUNNING so the UI can show real completion; a short floor keeps
+        # instant scenes from flickering and a hard cap bounds the wait (the
+        # UI's pending sweep sits at 6.5 s). Transient poll errors retry.
+        floor = time.monotonic() + 0.6
+        deadline = time.monotonic() + 5.0
+        while True:
+            time.sleep(0.25)
+            if time.monotonic() < floor:
+                continue
+            status = ""
+            try:
+                _, data = self._http.request(base + "/rest/rules/" + quoted,
+                                             timeout=6.0)
+                payload = json.loads(data.decode("utf-8"))
+                status = str(payload.get("status") or "") if isinstance(payload, dict) else ""
+            except Exception as exc:
+                self._log("debug", "rule status poll failed: %s" % redact_for_log(str(exc)))
+            if status != "RUNNING" or time.monotonic() >= deadline:
+                break
+        self._result(tag, True, "")
+
     # -- live connection ----------------------------------------------------
 
     def _resolved_url(self):
@@ -472,6 +516,16 @@ class Bridge:
             return self._config["localUrl"].rstrip("/")
         return self._config["url"].rstrip("/")
 
+    def _fetch_items(self, base):
+        _, data = self._http.request(base + "/rest/items?recursive=false",
+                                     timeout=12.0)
+        items = json.loads(data.decode("utf-8"))
+        if not isinstance(items, list):
+            raise HttpError(0, "unexpected items payload", KIND_NETWORK)
+        names = [i["name"] for i in items
+                 if isinstance(i, dict) and isinstance(i.get("name"), str)]
+        return items, names
+
     def _connect_http(self):
         def run():
             gen = self._generation
@@ -480,25 +534,22 @@ class Bridge:
             self._using_local = (
                 base != self._config.get("url", "").rstrip("/")
                 and bool(self._config.get("localUrl")))
-            if not re.match(r"^https?://", base):
+            if not urllib.parse.urlparse(base).scheme:
                 self._set_phase("error", "URL must start with http:// or https://", KIND_NETWORK)
                 return
             if base.startswith("http://"):
                 self._log("info", "connecting over plaintext http (token could be read on the LAN)")
             self._http = Http(self._config["token"])
             try:
-                res, data = self._http.request(base + "/rest/items?recursive=false",
-                                               timeout=12.0)
+                items, names = self._fetch_items(base)
                 if not self._want_connect or self._generation != gen:
                     return
-                items = json.loads(data.decode("utf-8"))
-                if not isinstance(items, list):
-                    raise HttpError(0, "unexpected items payload", KIND_NETWORK, data)
-                names = [i["name"] for i in items
-                         if isinstance(i, dict) and isinstance(i.get("name"), str)]
                 self._tracked_names = names
                 self.emit({"ev": "inventory", "items": items,
-                           "generation": self._generation})
+                            "generation": self._generation})
+                if not self._want_connect or self._generation != gen:
+                    return
+                self._emit_scenes(base, gen)
                 if not self._want_connect or self._generation != gen:
                     return
                 self._open_sse(base)
@@ -513,6 +564,29 @@ class Bridge:
                 self._set_phase("error", "connection failed", KIND_NETWORK)
                 self._schedule_reconnect()
         threading.Thread(target=run, daemon=True).start()
+
+    def _emit_scenes(self, base, gen):
+        try:
+            _, data = self._http.request(base + "/rest/rules", timeout=12.0)
+        except Exception as exc:
+            self._log("error", "scenes fetch failed: %s" % redact_for_log(str(exc)))
+            return
+        if not self._want_connect or self._generation != gen:
+            return
+        rules = json.loads(data.decode("utf-8"))
+        if not isinstance(rules, list):
+            return
+        scenes = []
+        for r in rules:
+            if not isinstance(r, dict):
+                continue
+            if "Scene" in (r.get("tags") or []):
+                scenes.append({
+                    "uid": str(r.get("uid", "")),
+                    "name": str(r.get("name", "") or r.get("uid", "")),
+                    "enabled": r.get("enabled", True),
+                })
+        self.emit({"ev": "scenes", "items": scenes, "generation": gen})
 
     def _handle_auth_failure(self):
         self._auth_failures += 1
@@ -586,11 +660,7 @@ class Bridge:
             for raw in self._iter_sse_lines(conn):
                 if not self._sse_run.is_set():
                     break
-                if isinstance(raw, bytes):
-                    line = raw.decode("utf-8", "replace")
-                else:
-                    line = raw
-                line = line.rstrip("\r\n")
+                line = raw.decode("utf-8", "replace").rstrip("\r\n")
                 if not line:
                     event_name = ""
                     event_bytes = 0
@@ -682,8 +752,6 @@ class Bridge:
                 base + "/rest/events/states/" + urllib.parse.quote(self._sse_connection_id, safe=""),
                 method="POST", body=json.dumps(names).encode("utf-8"),
                 ctype="application/json", timeout=8.0)
-        except HttpError as exc:
-            raise
         except Exception as exc:
             raise HttpError(0, str(exc), KIND_NETWORK)
 
@@ -709,15 +777,10 @@ class Bridge:
     def _refresh_http(self):
         try:
             base = self._resolved_url()
-            res, data = self._http.request(base + "/rest/items?recursive=false",
-                                           timeout=12.0)
-            items = json.loads(data.decode("utf-8"))
-            if not isinstance(items, list):
-                return
-            names = [i["name"] for i in items
-                     if isinstance(i, dict) and isinstance(i.get("name"), str)]
-            self.emit({"ev": "inventory", "items": items, "generation": self._generation})
+            items, names = self._fetch_items(base)
             self._tracked_names = names
+            self.emit({"ev": "inventory", "items": items, "generation": self._generation})
+            self._emit_scenes(base, self._generation)
             if self._sse_connection_id and self._sse_run.is_set():
                 self._post_tracked(base, names)
         except Exception as exc:
@@ -759,17 +822,10 @@ class Bridge:
         ending SSE connection. Closing the underlying socket directly unblocks
         any concurrent readline() reliably.
         """
-        sock = None
-        try:
-            fp = getattr(conn, "fp", None)
-            if fp is not None:
-                sock = getattr(fp, "raw", None)
-                sock = getattr(sock, "_sock", sock)
-        except Exception:
-            sock = None
+        sock = Http._stream_socket(conn)
         if sock is not None:
             try:
-                sock.shutdown(__import__("socket").SHUT_RDWR)
+                sock.shutdown(socket.SHUT_RDWR)
             except Exception:
                 pass
             try:

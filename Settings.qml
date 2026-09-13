@@ -23,6 +23,12 @@ Item {
   property bool opened: false
   property string tab: "connection"
 
+  // The stored credential has no Remove affordance while an operation is
+  // in flight; the demo mode button row hides it too.
+  readonly property bool canRemoveConnection: root.service
+    && root.service.configured && !root.service.demoMode
+    && !root.service.credentialBusy
+
   // Local until Connect, so a half-typed URL never reaches the bridge.
   property string urlDraft: ""
   property string localUrlDraft: ""
@@ -211,7 +217,6 @@ Item {
           }
 
           ButtonGroup {
-            id: tabRow
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             foreground: root.foreground
@@ -253,35 +258,12 @@ Item {
               width: connectionFlick.width
               spacing: Style.spacing.xxxl
 
-              Column {
-                width: connectionColumn.width
-                spacing: Style.spacing.sm
-
-                Text {
-                  textFormat: Text.PlainText
-                  text: "openHAB URL"
-                  color: Color.muted
-                  font.family: root.family
-                  font.pixelSize: Style.font.bodySmall
-                }
-
-                TextField {
-                  width: connectionColumn.width
-                  text: root.urlDraft
-                  placeholderText: "http://192.168.1.50:8080"
-                  onTextChanged: root.urlDraft = text
-                }
-
-                Text {
-                  textFormat: Text.PlainText
-                  width: connectionColumn.width
-                  visible: root.urlDraft.trim().toLowerCase().indexOf("http://") === 0
-                  text: "Warning: this URL sends your access token without transport encryption. Use HTTPS unless this is a trusted local network."
-                  color: Color.muted
-                  font.family: root.family
-                  font.pixelSize: Style.font.caption
-                  wrapMode: Text.WordWrap
-                }
+              DraftField {
+                draft: root.urlDraft
+                onDraftChanged: root.urlDraft = draft
+                labelText: "openHAB URL"
+                placeholderText: "http://192.168.1.50:8080"
+                warningText: "Warning: this URL sends your access token without transport encryption. Use HTTPS unless this is a trusted local network."
               }
 
               Column {
@@ -306,41 +288,20 @@ Item {
                   }
                 }
 
-                TextField {
-                  visible: root.localUrlExpanded
-                  width: connectionColumn.width
-                  text: root.localUrlDraft
+                DraftField {
+                  draft: root.localUrlDraft
+                  onDraftChanged: root.localUrlDraft = draft
+                  fieldVisible: root.localUrlExpanded
                   placeholderText: "http://192.168.1.50:8080"
-                  onTextChanged: root.localUrlDraft = text
+                  warningText: "Warning: this URL sends your access token without transport encryption. Use HTTPS unless this is a trusted local network."
                 }
 
-                Text {
-                  textFormat: Text.PlainText
-                  width: connectionColumn.width
-                  visible: root.localUrlExpanded
-                    && root.localUrlDraft.trim().toLowerCase().indexOf("http://") === 0
-                  text: "Warning: this URL sends your access token without transport encryption. Use HTTPS unless this is a trusted local network."
-                  color: Color.muted
-                  font.family: root.family
-                  font.pixelSize: Style.font.caption
-                  wrapMode: Text.WordWrap
-                }
-
-                Text {
-                  textFormat: Text.PlainText
-                  visible: root.localUrlExpanded
-                  text: "Trusted Wi-Fi network name(s)"
-                  color: Color.muted
-                  font.family: root.family
-                  font.pixelSize: Style.font.bodySmall
-                }
-
-                TextField {
-                  visible: root.localUrlExpanded
-                  width: connectionColumn.width
-                  text: root.trustedNetworkDraft
+                DraftField {
+                  draft: root.trustedNetworkDraft
+                  onDraftChanged: root.trustedNetworkDraft = draft
+                  fieldVisible: root.localUrlExpanded
+                  labelText: "Trusted Wi-Fi network name(s)"
                   placeholderText: "Home, Home 5G"
-                  onTextChanged: root.trustedNetworkDraft = text
                 }
 
                 // A suggestion, not an autofill.
@@ -397,19 +358,17 @@ Item {
                     font.pixelSize: Style.font.bodySmall
                   }
 
-                  TextField {
-                    width: connectionColumn.width
-                    text: root.userDraft
+                  DraftField {
+                    draft: root.userDraft
+                    onDraftChanged: root.userDraft = draft
                     placeholderText: "openHAB username"
-                    onTextChanged: root.userDraft = text
                   }
 
-                  TextField {
-                    width: connectionColumn.width
-                    text: root.passwordDraft
-                    password: true
+                  DraftField {
+                    draft: root.passwordDraft
+                    onDraftChanged: root.passwordDraft = draft
+                    passwordField: true
                     placeholderText: "openHAB password"
-                    onTextChanged: root.passwordDraft = text
                   }
                 }
 
@@ -427,20 +386,12 @@ Item {
                   width: connectionColumn.width
                   spacing: Style.spacing.sm
 
-                  Text {
-                    textFormat: Text.PlainText
-                    text: "Access token"
-                    color: Color.muted
-                    font.family: root.family
-                    font.pixelSize: Style.font.bodySmall
-                  }
-
-                  TextField {
-                    width: connectionColumn.width
-                    text: root.tokenDraft
-                    password: true
+                  DraftField {
+                    draft: root.tokenDraft
+                    onDraftChanged: root.tokenDraft = draft
+                    labelText: "Access token"
+                    passwordField: true
                     placeholderText: "Paste your openHAB API token"
-                    onTextChanged: root.tokenDraft = text
                   }
 
                   Text {
@@ -482,16 +433,14 @@ Item {
                 }
 
                 Button {
-                  visible: root.service && root.service.configured
-                    && !root.service.demoMode && !root.service.credentialBusy
+                  visible: root.canRemoveConnection
                   bordered: true
                   text: "Remove"
-                  opacity: (root.service && root.service.configured
-                            && !root.service.credentialBusy) ? 1.0 : 0.45
+                  opacity: root.canRemoveConnection ? 1.0 : 0.45
                   foreground: root.foreground
                   fontFamily: root.family
                   onClicked: {
-                    if (!root.service || !root.service.configured) return
+                    if (!root.canRemoveConnection) return
                     root.service.removeConnection()
                     root.resetDrafts()
                   }
@@ -621,7 +570,6 @@ Item {
 
               // ---------- left: everything there is ----------
               Item {
-                id: browseColumn
                 anchors { top: parent.top; bottom: parent.bottom; left: parent.left }
                 width: columns.columnWidth
 
@@ -634,29 +582,17 @@ Item {
                   fontFamily: root.family
                 }
 
-                // The note collapses to zero height when hidden, but the
-                // collapse is driven by a wrapper so the Text's height is
-                // never bound to its own implicitHeight (which QML flags as a
-                // binding loop).
-                Item {
+                // The note collapses to zero height when hidden; CollapsingNote
+                // drives that with a wrapper so the Text's height is never
+                // bound to its own implicitHeight (a QML binding loop).
+                CollapsingNote {
                   id: emptyNote
                   anchors { top: allHeader.bottom; left: parent.left; right: parent.right }
                   anchors.topMargin: Style.spacing.lg
-                  visible: picker.results.length === 0
-                  height: visible ? noteText.implicitHeight : 0
-
-                  Text {
-                    textFormat: Text.PlainText
-                    id: noteText
-                    anchors.fill: parent
-                    visible: emptyNote.visible
-                    text: root.service && root.service.itemCount === 0
+                  noteVisible: picker.results.length === 0
+                  noteText: root.service && root.service.itemCount === 0
                     ? "No items yet — connect first."
-                      : "Nothing matches that search."
-                    color: Color.muted
-                    font.family: root.family
-                    font.pixelSize: Style.font.bodySmall
-                  }
+                    : "Nothing matches that search."
                 }
 
                 ListView {
@@ -674,27 +610,24 @@ Item {
 
                   Connections {
                     target: root
-                    function onAppliedQueryChanged() { itemList.positionViewAtBeginning() }
-                    function onFilterChipChanged() { itemList.positionViewAtBeginning() }
+                    function onAppliedQueryChanged() {
+                      itemList.positionViewAtBeginning()
+                      favList.positionViewAtBeginning()
+                    }
+                    function onFilterChipChanged() {
+                      itemList.positionViewAtBeginning()
+                      favList.positionViewAtBeginning()
+                    }
                   }
 
-                  delegate: SettingsItemRow {
-                    required property var modelData
-                    width: itemList.width
-                    itemName: modelData.itemName
-                    name: modelData.name
-                    detail: modelData.available ? modelData.state : "Unavailable"
-                    favorite: modelData.favorite
-                    available: modelData.available
-                    panelItem: false
-                    service: root.service
+                  delegate: ItemRowDelegate {
+                    serviceRef: root.service
                   }
                 }
               }
 
               // ---------- right: what the panel shows ----------
               Item {
-                id: favColumn
                 anchors { top: parent.top; bottom: parent.bottom; right: parent.right }
                 width: columns.columnWidth
 
@@ -710,23 +643,12 @@ Item {
 
                 // The column keeps its width when empty, so it needs to say
                 // why it is blank rather than read as a rendering fault.
-                Item {
+                CollapsingNote {
                   id: favEmptyNote
                   anchors { top: favHeader.bottom; left: parent.left; right: parent.right }
                   anchors.topMargin: Style.spacing.lg
-                  visible: picker.favorites.length === 0
-                  height: visible ? favNoteText.implicitHeight : 0
-
-                  Text {
-                    textFormat: Text.PlainText
-                    id: favNoteText
-                    anchors.fill: parent
-                    visible: favEmptyNote.visible
-                    text: "Nothing picked yet — star an item on the left."
-                    color: Color.muted
-                    font.family: root.family
-                    font.pixelSize: Style.font.bodySmall
-                  }
+                  noteVisible: picker.favorites.length === 0
+                  noteText: "Nothing picked yet — star an item on the left."
                 }
 
                 ListView {
@@ -741,16 +663,9 @@ Item {
                   model: picker.favorites
                   ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-                  delegate: SettingsItemRow {
-                    required property var modelData
-                    width: favList.width
-                    itemName: modelData.itemName
-                    name: modelData.name
-                    detail: modelData.available ? modelData.state : "Unavailable"
-                    favorite: true
-                    available: modelData.available
-                    panelItem: true
-                    service: root.service
+                  delegate: ItemRowDelegate {
+                    panelItemRow: true
+                    serviceRef: root.service
                   }
                 }
               }
