@@ -19,6 +19,16 @@ panel in the shell) that lists your home by room:
 - Dimmers and Color lights get an expandable brightness slider (0–100, sent on
   release).
 - Everything else is listed for visibility only.
+- **Scenes**: instances with `Scene` items get a SCENES band above the item
+  list (hidden when there are none) — cursor to a chip and press `enter` to
+  run it. Rules disabled in openHAB are dimmed with their tooltip; a running
+  scene's chip spins until openHAB reports it finished.
+- **Favorites view**: star any item from Settings → Items browser to pin it
+  for quick access. Favorites is the panel's default view, with every location
+  still one entry away in the view dropdown.
+- **Pop-out window**: a button in the panel header detaches the whole panel
+  into its own floating window — move and resize it anywhere, with the same
+  keyboard control and live view.
 
 ## Connecting
 
@@ -64,12 +74,39 @@ switches, dimmers, and a colour light — driven by the same bridge code path as
 a real instance, so what you see is exactly what a live connection behaves
 like.
 
+## Scenes
+
+When your instance has `Scene` items, a **SCENES** band appears between the
+panel header and the item list. `j` / `k` move the cursor; moving up past the
+first item reaches the band, where `←` / `→` pick a chip and `enter` runs the
+highlighted scene. A scene you ran with `enter` behaves identically to running
+it in the openHAB UI. With no `Scene` items the band is hidden entirely.
+
+## Favorites
+
+Press `s` and open the **Items** tab: every item gets a star button to pin it
+("Add to panel"). Pinned items are the panel's default view — the dropdown
+above the item list shows **Favorites** and one entry per location — so your
+most-used switches stay one keypress away. The tab's right column ("IN THE
+PANEL") lists what's pinned, with up/down buttons to reorder and a star to
+unpin.
+
+## Pop-out window
+
+The button at the top-right of the panel header pops the panel out into its
+own floating window, detached from the bar. Drag it to any screen and resize
+it freely — it keeps the full panel behaviour: keyboard navigation, every
+shortcut (`r` refresh, `e` expand, `s` settings), and `esc` closes it back
+into the bar popup.
+
 ## Keyboard
 
 `j` / `k` (or `↑` / `↓`) move between room rows and their expanded controls.
 `enter` toggles the selected switch. `e` expands the selected light's
 brightness slider, `←` / `→` adjust it (and `enter` commits). `s` opens
 settings, `r` refreshes, `esc` closes. `tab` moves to the next bar panel.
+With scenes active, `←` / `→` on the SCENES band select a chip and `enter`
+runs it (see [Scenes](#scenes)).
 
 ## Lights, and everything else
 

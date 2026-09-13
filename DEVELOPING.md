@@ -47,8 +47,19 @@ Reference implementation this is built against: `https://github.com/konradk/hass
 - `Mark.js`: the openHAB brand mark's geometry (official SVG paths parsed into
   absolute commands and fitted into a square), replayed by `OpenHabIcon.qml`.
 - `OpenHabIcon.qml`: Canvas drawing of the openHAB mark in a single theme tint.
-- `Panel.qml`: bar widget, popup, keyboard navigation, and IPC surface.
-- `Settings.qml`: connection settings overlay.
+- `Panel.qml`: bar widget, popup, pop-out `FloatingWindow`, keyboard
+  navigation, and IPC surface.
+- `PanelBody.qml`: panel content shared by the popup and the pop-out window —
+  SCENES band, items chooser, cursor, and "not configured / no devices /
+  nothing pinned" states.
+- `SceneStrip.qml`: the SCENES band (one chip per `Scene` item, run on
+  activation, dimmed/spinning for disabled/running rules).
+- `Settings.qml`: connection settings overlay with Connection and Items
+  tabs (items browser + favorites list).
+- `DraftField.qml`, `CollapsingNote.qml`: shared settings field and notice
+  components.
+- `ItemRowDelegate.qml`, `SettingsItemRow.qml`: shared list rows for the
+  panel list and the settings Items tab.
 - `bin/oh-bridge`: openHAB REST/SSE protocol adapter and demo backend.
 - `tests/fake_openhab.py`: local fake openHAB used by bridge tests.
 
