@@ -61,6 +61,9 @@ Reference implementation this is built against: `https://github.com/konradk/hass
 - `ItemRowDelegate.qml`, `SettingsItemRow.qml`: shared list rows for the
   panel list and the settings Items tab.
 - `bin/oh-bridge`: openHAB REST/SSE protocol adapter and demo backend.
+- `bin/read_config.py`: bounded, symlink-safe reader for `config.json`
+  (lstat type/owner/size checks, `O_NOFOLLOW`); `Service.qml` uses it instead
+  of reading through `FileView`, which follows symlinks and reads until EOF.
 - `tests/fake_openhab.py`: local fake openHAB used by bridge tests.
 
 Keep transport, credential lifecycle, state projection, and UI policy

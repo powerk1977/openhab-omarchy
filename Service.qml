@@ -61,14 +61,57 @@ QtObject {
 
   // ------------------------------------------------------------ config
 
+  // Reads go through bin/read_config.py instead of FileView: FileView follows
+  // symlinks and reads until EOF, so a FIFO swapped in for config.json would
+  // stall the shell and an oversized file would exhaust memory. The helper
+  // lstats first (regular file only, owned by us, size capped) and opens with
+  // O_NOFOLLOW. FileView stays for change-watching (inotify, no content read:
+  // preload is off) and for atomic writes, which replace the path by rename
+  // and so cannot be redirected through a symlink.
+  readonly property int configMaxBytes: 65536
+
+  // Base64 of the file content, accumulated from the read process. Base64 is
+  // newline-free, so SplitParser hands us exactly one chunk.
+  property string configReadBuffer: ""
+
   property FileView configFile: FileView {
     path: root.configPath
     watchChanges: true
+    preload: false
     printErrors: false
     atomicWrites: true
-    onLoaded: root.applyConfig(text())
-    onLoadFailed: root.applyConfig("")
-    onFileChanged: reload()
+    onFileChanged: root.readConfig()
+  }
+
+  property Process configReadProcess: Process {
+    command: []
+    stdout: SplitParser {
+      onRead: function(value) {
+        root.configReadBuffer += String(value || "")
+      }
+    }
+    onExited: function(exitCode) {
+      var text = ""
+      if (exitCode === 0 && root.configReadBuffer) {
+        try {
+          text = Qt.atob(root.configReadBuffer)
+        } catch (e) {
+          text = ""
+        }
+      }
+      root.configReadBuffer = ""
+      root.applyConfig(text)
+    }
+  }
+
+  function readConfig() {
+    if (root.configReadProcess.running) return
+    root.configReadBuffer = ""
+    root.configReadProcess.command = [
+      "python3", root.pluginDir + "/bin/read_config.py",
+      root.configPath, String(root.configMaxBytes)
+    ]
+    root.configReadProcess.running = true
   }
 
   function currentConfig() {
@@ -287,7 +330,8 @@ QtObject {
     var text = ConfigStore.serialize(config)
 
     configFile.setText(text)
-    // FileView does not re-emit onLoaded for its own write.
+    // The watcher re-reads the file a moment later; applyConfig dedups on
+    // appliedConfigText, so the immediate apply below is what counts.
     root.applyConfig(text)
   }
 
@@ -299,7 +343,10 @@ QtObject {
     command: ["mkdir", "-p", root.configDir]
   }
 
-  Component.onCompleted: root.configDirProcess.running = true
+  Component.onCompleted: {
+    root.configDirProcess.running = true
+    root.readConfig()
+  }
 
   // ------------------------------------------------------------ credentials
 
@@ -460,9 +507,9 @@ QtObject {
   }
 
   // The text last projected into the properties below. saveConfig applies its
-  // own write immediately (FileView doesn't re-emit onLoaded for it), and the
-  // watcher then reports the same file a moment later — so every save
-  // otherwise re-applied and re-projected the whole list twice.
+  // own write immediately, and the watcher then reports the same file a moment
+  // later — so every save otherwise re-applied and re-projected the whole list
+  // twice.
   property string appliedConfigText: ""
 
   function applyConfig(text) {
